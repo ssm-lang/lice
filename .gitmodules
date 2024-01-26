@@ -1,0 +1,3 @@
+[submodule "MicroHs"]
+	path = MicroHs
+	url = git@github.com:augustss/MicroHs.git
