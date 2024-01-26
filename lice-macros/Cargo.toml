@@ -1,0 +1,17 @@
+[package]
+name = "lice-macros"
+description = "macros for the lice crate"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0"
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+syn = { version = "2.0", features = ["full"] }
+darling = { version = "0.20.3" }
+nom = { version = "7.1.3" }

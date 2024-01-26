@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "lice",
+    "lice-scope",
+    "lice-macros",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["John Hui <j-hui@cs.columbia.edu>"]
+license = "MIT"
