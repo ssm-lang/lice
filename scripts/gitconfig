@@ -1,0 +1,6 @@
+# Expose relevant scripts to be run as git aliases
+
+[alias]
+mhs = "!$(git rev-parse --show-toplevel)/scripts/mhs"
+
+;  vim: set ts=4 sw=0 tw=80 et ft=gitconfig :
