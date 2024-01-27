@@ -1,11 +1,15 @@
 //! Combinator file parser.
-use crate::comb::{CombFile, Expr, Index, Label, Prim, Program, NIL_INDEX};
+use crate::comb::{CombFile, Expr, Index, Prim, Program, NIL_INDEX};
+use anyhow::{anyhow, bail, ensure, Result};
 use nom::{
     branch::alt,
-    bytes::complete::{is_not, tag},
-    character::complete::{alphanumeric1, char, digit1, multispace0},
-    combinator::{cut, map_res, opt, recognize, verify},
-    multi::{fold_many0, many1_count},
+    bytes::complete::{is_not, take_till},
+    character::{
+        complete::{char, digit1, multispace0},
+        is_space,
+    },
+    combinator::{map_res, opt, recognize, verify},
+    multi::fold_many0,
     number::complete::double,
     sequence::{delimited, preceded, separated_pair},
     IResult, Parser,
@@ -13,7 +17,18 @@ use nom::{
 use std::str::FromStr;
 
 /// The result of parsing. A parser monad, even. Typedef'd here for convenience.
-type Parse<'a, T> = IResult<&'a str, T>;
+type Parse<'a, T> = IResult<&'a str, T, E<'a>>;
+
+/// The nom error type.
+///
+/// This is already the default in `IResult`, but I define it here as a single letter to make type
+/// annot(tions less cumbersome.)
+type E<'a> = nom::error::Error<&'a str>;
+
+/// Adapt `nom` errors into `anyhow` errors.
+fn to_anyhow(e: nom::Err<nom::error::Error<&str>>) -> anyhow::Error {
+    anyhow!("{e}")
+}
 
 /// Parse an unsigned integer literal.
 fn uinteger(i: &str) -> Parse<usize> {
@@ -63,180 +78,157 @@ fn string_literal(input: &str) -> Parse<String> {
     delimited(char('"'), build_string, char('"')).parse(input)
 }
 
-impl CombFile {
-    /// Parse a combinator file.
-    fn parse(i: &str) -> Parse<Self> {
-        let i = multispace0(i)?.0;
-        let (i, version) = preceded(char('v'), separated_pair(uinteger, char('.'), uinteger))(i)?;
-        let i = multispace0(i)?.0;
-        let (i, size) = uinteger(i)?;
-        let i = multispace0(i)?.0;
-        let (i, program) = Program::parse(i, size)?;
-
-        Ok((
-            i,
-            Self {
-                version,
-                size,
-                program,
-            },
-        ))
-    }
-}
-
 impl Program {
-    /// Entry point to parsing the program of a combinator file.
-    fn parse(i: &str, size: usize) -> Parse<Self> {
-        let mut p = Self {
-            root: NIL_INDEX,
-            body: Vec::new(),
-            defs: Vec::new(),
-        };
-        p.defs.resize(size, NIL_INDEX);
-
-        let (i, root) = p.parse_expr(i)?;
-        p.root = root;
-
-        for (label, &def) in p.defs.iter().enumerate() {
-            // TODO: convert to actual error? or just throw hands like we do now
-            // But if we want to do this right way, we will have to define our own nom error trait.
-            assert!(def != NIL_INDEX, "label {label} is not initialized!");
-        }
-
-        Ok((i, p))
-    }
-
     /// Parse an expression; this function is recursive.
-    fn parse_expr<'i>(&mut self, i: &'i str) -> Parse<'i, Index> {
-        let prim_token = recognize(many1_count(alt((
-            // Characters that possibly appear in a primitive identifier
-            alphanumeric1,
-            tag("'"),
-            tag("."),
-            tag("+"),
-            tag("-"),
-            tag("*"),
-            tag("/"),
-            tag("="),
-            tag("<"),
-            tag(">"),
-            tag("&"),
-            tag("|"),
-            tag("!"),
-        ))));
+    fn parse_item<'i>(
+        &mut self,
+        stk: &mut Vec<Index>,
+        i: &'i str,
+    ) -> Result<(&'i str, Option<Index>)> {
+        let i = multispace0::<_, E<'i>>(i).map_err(to_anyhow)?.0;
 
-        let i = multispace0(i)?.0;
-        let (i, c) = if let Ok((i, (f, l, a))) = self.parse_app(i) {
-            (i, (Expr::App(f, l, a)))
-        } else if let Ok((i, (sz, arr))) = self.parse_array(i) {
-            (i, (Expr::Array(sz, arr)))
-        } else {
-            alt((
-                preceded(char('&'), double).map(Expr::Float),
-                preceded(char('#'), integer).map(Expr::Int),
-                preceded(char('_'), uinteger).map(Expr::Ref),
-                string_literal.map(Expr::String),
-                preceded(char('!'), string_literal).map(Expr::Tick),
-                preceded(char('^'), alphanumeric1) // NOTE: this accepts identifiers like ^1piece
-                    .map(String::from)
-                    .map(Expr::Ffi),
-                prim_token.map(|s| {
-                    if let Ok(p) = Prim::from_str(s) {
-                        Expr::Prim(p)
-                    } else {
-                        Expr::Unknown(s.to_string())
-                    }
-                }),
-            ))
-            .parse(i)?
-        };
+        if let (i, Some(_)) = opt(char('@'))(i).map_err(to_anyhow)? {
+            ensure!(stk.len() >= 2, "unexpected '@', cannot pop 2 from stack");
+            let a = stk.pop().unwrap(); // safe due to above bounds check
+            let f = stk.pop().unwrap(); // safe due to above bounds check
 
-        let i = multispace0(i)?.0;
-
-        let index = self.body.len();
-        self.body.push(c);
-
-        Ok((i, index))
-    }
-
-    /// Parse an application expression.
-    fn parse_app<'i>(&mut self, i: &'i str) -> Parse<'i, (Index, Option<Label>, Index)> {
-        let i = char('(')(i)?.0;
-        let i = multispace0(i)?.0;
-        let (i, f) = self.parse_expr(i)?;
-        let i = multispace0(i)?.0;
-        let (i, label) = opt(preceded(char(':'), uinteger))(i)?; // possible :def
-        let i = multispace0(i)?.0;
-        let (i, a) = self.parse_expr(i)?;
-        let i = multispace0(i)?.0;
-        let i = char(')')(i)?.0;
-
-        if let Some(label) = label {
-            self.defs[label] = a;
+            log::trace!(
+                "encountered item '@', stored at index {}, applying {f} to {a}",
+                self.body.len()
+            );
+            self.body.push(Expr::App(f, a));
+            stk.push(self.body.len() - 1);
+            return Ok((i, None));
         }
 
-        Ok((i, (f, label, a)))
-    }
+        if let (i, Some(label)) = opt(preceded(char(':'), uinteger))(i).map_err(to_anyhow)? {
+            // Labels are prefix (e.g., `:123 e`), so we put the index of the next expr item
+            self.defs[label] = self.body.len();
 
-    /// Parse an array literal expression.
-    fn parse_array<'i>(&mut self, i: &'i str) -> Parse<'i, (usize, Vec<Index>)> {
-        let i = char('[')(i)?.0;
-        let i = multispace0(i)?.0;
-        let (i, sz) = uinteger(i)?;
+            log::trace!(
+                "encountered item ':{label}', which will define item at index {}",
+                self.body.len()
+            );
+            return Ok((i, None));
+        }
 
-        let mut v = Vec::new();
-        v.reserve_exact(sz);
+        if let (i, Some(len)) =
+            opt(delimited(char('['), uinteger, char(']')))(i).map_err(to_anyhow)?
+        {
+            ensure!(
+                stk.len() >= len,
+                "unexpected '[{len}]', cannot pop {len} from stack"
+            );
 
-        let mut ii = i; // Keep around input slice between iters of this awkward loop
-        loop {
-            let i = ii;
-            let i = multispace0(i)?.0;
-            if let (i, Some(_)) = opt(char(']'))(i)? {
-                // assert that the vector is large enough?
-                return Ok((i, (sz, v)));
+            let mut arr = Vec::new();
+            for _ in 0..len {
+                arr.push(stk.pop().unwrap()); // safe due to above bounds check
             }
-            let (i, c) = self.parse_expr(i)?;
-            v.push(c);
-            ii = i;
+            // Remove this logging once this is clarified
+            log::warn!("TODO: validate correct application order for postfix [{len}]");
+
+            log::trace!(
+                "encountered item '[{len}], stored at index {}",
+                self.body.len()
+            );
+            self.body.push(Expr::Array(len, arr));
+            stk.push(self.body.len() - 1);
+            return Ok((i, None));
         }
+
+        if let (i, Some(_)) = opt(char('}'))(i).map_err(to_anyhow)? {
+            if let Some(root) = stk.pop() {
+                log::trace!("encountered EOF indicator '}}', root stored at {root}");
+                return Ok((i, Some(root)));
+            } else {
+                bail!("encountered EOF indicator '}}' with empty stack");
+            }
+        }
+
+        let (i, c) = alt((
+            preceded(char('&'), double).map(Expr::Float),
+            preceded(char('#'), integer).map(Expr::Int),
+            preceded(char('_'), uinteger).map(Expr::Ref),
+            string_literal.map(Expr::String),
+            preceded(char('!'), string_literal).map(Expr::Tick),
+            preceded(char('^'), take_till(|c| is_space(c as u8))) // NOTE: this accepts identifiers like ^1piece
+                .map(String::from)
+                .map(Expr::Ffi),
+            take_till(|c| is_space(c as u8)).map(|s| {
+                if let Ok(p) = Prim::from_str(s) {
+                    Expr::Prim(p)
+                } else {
+                    log::error!("encountered unknown symbol: {s}");
+                    Expr::Unknown(s.to_string())
+                }
+            }),
+        ))
+        .parse(i)
+        .map_err(to_anyhow)?;
+
+        log::trace!(
+            "encountered item '{c}', stored at index {}",
+            self.body.len()
+        );
+        self.body.push(c);
+        stk.push(self.body.len() - 1);
+        Ok((i, None))
     }
 }
 
 impl FromStr for CombFile {
-    type Err = String;
+    type Err = anyhow::Error;
+    fn from_str(i: &str) -> Result<Self> {
+        let version = preceded(char('v'), separated_pair(uinteger, char('.'), uinteger));
+        let mut version = preceded(multispace0, version);
+        let mut size = preceded(multispace0, uinteger);
 
-    /// `from_str()` implementation that encapsulates all the `nom` stuff and translates errors
-    /// into a somewhat readable string.
-    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
-        match cut(CombFile::parse)(s) {
-            Ok((input, c)) => {
-                let input = input.trim();
-                if input.is_empty() {
-                    return Ok(c);
-                }
+        let (i, version) = version(i).map_err(to_anyhow)?;
+        ensure!(
+            version.0 >= 7,
+            "expected comb file version >= 7.0, got {}.{}",
+            version.0,
+            version.1
+        );
 
-                let input = if input.lines().count() > 1 || input.len() > 36 {
-                    let mut line = input.lines().next().unwrap().to_string();
-                    line.truncate(36);
-                    format!("{}...", line)
-                } else {
-                    input.to_string()
-                };
-                Err(format!("trailing characters: ...{input}"))
-            }
-            Err(nom::Err::Failure(nom::error::Error { input, code })) => {
-                let input = input.trim();
-                let input = if input.lines().count() > 1 || input.len() > 36 {
-                    let mut line = input.lines().next().unwrap().to_string();
-                    line.truncate(36);
-                    format!("{}...", line)
-                } else {
-                    input.to_string()
-                };
-                Err(format!("encountered error parsing {code:?} from: {input}"))
-            }
-            // shouldn't be reachable but wtv
-            Err(e) => Err(format!("{e}")),
+        let (i, size) = size(i).map_err(to_anyhow)?;
+
+        let mut program = Program {
+            root: NIL_INDEX,
+            body: Vec::new(),
+            defs: Vec::new(),
+        };
+        program.defs.resize(size, NIL_INDEX);
+
+        let mut stk = Vec::new();
+        let mut ii = i;
+        let mut root = None;
+
+        while root.is_none() {
+            (ii, root) = program.parse_item(&mut stk, ii)?;
         }
+
+        // Some sanity checks
+        ensure!(ii.trim().is_empty(), "trailing characters: {ii}");
+        ensure!(
+            stk.is_empty(),
+            "un-applied expressions in parse stack: {stk:#?}"
+        );
+
+        for (label, &def) in program.defs.iter().enumerate() {
+            ensure!(def != NIL_INDEX, "label #{label} is not initialized");
+            ensure!(
+                def < program.body.len(),
+                "label #{label} is out of bounds: {def}"
+            );
+        }
+
+        program.root = root.unwrap(); // Safe due to check in while loop
+
+        Ok(Self {
+            version,
+            size,
+            program,
+        })
     }
 }

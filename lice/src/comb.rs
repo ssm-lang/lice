@@ -60,7 +60,7 @@ pub struct Program {
 pub enum Expr {
     /// Application of two expressions, with possible definition label: i.e., `(func [:label] arg)`.
     #[display("@")]
-    App(Index, Option<Label>, Index),
+    App(Index, Index),
     /// Floating point literal, i.e., `&float`.
     #[display("&{0}")]
     Float(Float),
@@ -92,7 +92,7 @@ pub enum Expr {
 
 impl Expr {
     pub(crate) fn new_app() -> Self {
-        Self::App(NIL_INDEX, None, NIL_INDEX)
+        Self::App(NIL_INDEX, NIL_INDEX)
     }
 
     pub(crate) fn new_ref() -> Self {
@@ -101,6 +101,16 @@ impl Expr {
 }
 
 /// Types of primitive values (leaf nodes) that can appear in the combinator graph.
+///
+/// TODO: the following symbols are still unknown
+///   ==
+///   >=
+///   >
+///   <=
+///   <
+///   /=
+///   ==
+///   ord
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
 #[display("{0}")]
 pub enum Prim {
@@ -209,6 +219,10 @@ pub enum BuiltIn {
     ICmp,
     #[display("rnf")]
     Rnf,
+    #[display("fromUTF8")]
+    FromUtf8,
+    #[display("chr")]
+    Chr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
@@ -267,6 +281,7 @@ pub enum Arith {
     UGe,
     #[display("toInt")]
     ToInt,
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
@@ -368,6 +383,7 @@ pub enum Array {
     PeekCAStringLen,
 }
 
+/*
 impl std::fmt::Display for CombFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -536,3 +552,4 @@ mod tests {
         );
     }
 }
+*/

@@ -158,7 +158,7 @@ impl<T: Clone> CombGraph<T> {
             for (e, w, tgt) in &changes {
                 self.g.remove_edge(*e);
 
-                if matches!(self.g[*tgt].expr, Expr::App(_, _, _) | Expr::Array(_, _)) {
+                if matches!(self.g[*tgt].expr, Expr::App(_, _) | Expr::Array(_, _)) {
                     // Non-leaf node; redirect pointer
                     // println!(
                     //     "Forwarding indirection to non-leaf node: {}",
@@ -181,7 +181,7 @@ impl<T: Clone> CombGraph<T> {
         let mut app = top;
         for _ in 0..comb.arity() {
             assert!(
-                matches!(self.g[app].expr, Expr::App(_, _, _)),
+                matches!(self.g[app].expr, Expr::App(_, _)),
                 "expected @ node in redex, instead found {}",
                 self.g[app].expr
             );
@@ -297,7 +297,7 @@ impl From<&Program> for CombGraph<Index> {
             };
 
             match &expr {
-                Expr::App(f, _, a) => {
+                Expr::App(f, a) => {
                     let f = index[*f].unwrap_or_else(|| {
                         let that = g.add_node(None);
                         index[*f] = Some(that);
