@@ -35,7 +35,7 @@ fn build_metadata(p: &Program) -> Vec<NodeMetadata> {
     let mut metadata = Vec::new();
     metadata.resize_with(p.body.len(), Default::default);
     let mut x_pos = 1.0;
-    build_meta(p, &mut metadata, &mut x_pos, p.body.len() - 1, 0);
+    build_meta(p, &mut metadata, &mut x_pos, p.root, 0);
     metadata
 }
 
