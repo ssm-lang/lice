@@ -158,7 +158,7 @@ impl Program {
                 if let Ok(p) = Prim::from_str(s) {
                     Expr::Prim(p)
                 } else {
-                    log::error!("encountered unknown symbol: {s}");
+                    log::warn!("encountered unknown symbol: {s}");
                     Expr::Unknown(s.to_string())
                 }
             }),
