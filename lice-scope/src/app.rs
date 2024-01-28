@@ -48,7 +48,7 @@ impl App for CombApp {
     fn update(&mut self, ctx: &Context, _: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add(
-                &mut GraphView::<_, _, _, _, NodeShape, EdgeShape>::new(&mut self.g)
+                &mut GraphView::<_, _, _, _, NodeShape, EdgeShape>::new(&mut self.g.g)
                     .with_interactions(&SettingsInteraction::new().with_dragging_enabled(true))
                     .with_styles(&SettingsStyle::new().with_labels_always(true))
                     .with_navigations(

@@ -9,14 +9,17 @@ use egui_graphs::{
 };
 use lice::{
     comb::{Expr, Index, Program, Turner},
-    graph::{CombEdge, CombGraph, CombIx, CombNode, CombTy},
+    graph::{CombEdge, CombGraph, CombIx, CombNode, CombTy, NodeIndex},
 };
 
 pub type GuiNode = CombNode<NodeMetadata>;
 pub type GuiEdge = CombEdge;
 
 /// GUI for [`lice::graph::CombGraph`].
-pub type GuiGraph = Graph<GuiNode, GuiEdge, CombTy, CombIx, NodeShape, EdgeShape>;
+pub struct GuiGraph {
+    pub root: NodeIndex,
+    pub g: Graph<GuiNode, GuiEdge, CombTy, CombIx, NodeShape, EdgeShape>,
+}
 
 /// Cell metadata, acquired while parsing the combinator file.
 ///
@@ -92,23 +95,26 @@ pub fn to_gui_graph(p: &Program) -> GuiGraph {
     println!("After: {} nodes", g.g.node_count());
     // End: an ad hoc set of transformations that should probably be done interactively/elsewhere
 
-    to_graph_custom(
-        &g.g.map(|_, n| n.map(|&i| metadata[i].clone()), |_, &e| e),
-        |ni, n| {
-            let mut node = Node::new(n.clone());
-            node.set_label(n.expr.to_string());
-            node.bind(
-                ni,
-                // NOTE: vertical pos is inverted
-                Pos2::new(
-                    node.payload().meta.x_pos * 50.0,
-                    node.payload().meta.depth as f32 * 50.0,
-                ),
-            );
-            node
-        },
-        default_edge_transform,
-    )
+    GuiGraph {
+        root: g.root,
+        g: to_graph_custom(
+            &g.g.map(|_, n| n.map(|&i| metadata[i].clone()), |_, &e| e),
+            |ni, n| {
+                let mut node = Node::new(n.clone());
+                node.set_label(n.expr.to_string());
+                node.bind(
+                    ni,
+                    // NOTE: vertical pos is inverted
+                    Pos2::new(
+                        node.payload().meta.x_pos * 50.0,
+                        node.payload().meta.depth as f32 * 50.0,
+                    ),
+                );
+                node
+            },
+            default_edge_transform,
+        ),
+    }
 }
 
 #[derive(Debug, Clone)]
