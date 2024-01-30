@@ -164,7 +164,7 @@ impl EdgeShape {
             CombEdge::Fun => Color32::RED,
             CombEdge::Arg => Color32::DARK_RED,
             CombEdge::Ind => Color32::BLUE,
-            CombEdge::Arr => Color32::GREEN,
+            CombEdge::Arr(_) => Color32::GREEN,
         }
     }
 }

@@ -31,7 +31,7 @@ pub enum CombEdge {
     Fun,
     Arg,
     Ind,
-    Arr,
+    Arr(usize),
 }
 
 pub type CombIx = DefaultIx;
@@ -383,14 +383,14 @@ impl From<&Program> for CombGraph<Index> {
                     g.add_edge(this, d, CombEdge::Ind);
                 }
                 Expr::Array(_, arr) => {
-                    for a in arr {
+                    for (i, a) in arr.iter().enumerate() {
                         let e = program.defs[*a];
                         let e = index[e].unwrap_or_else(|| {
                             let that = g.add_node(None);
                             index[e] = Some(that);
                             that
                         });
-                        g.add_edge(this, e, CombEdge::Arr);
+                        g.add_edge(this, e, CombEdge::Arr(i));
                     }
                 }
                 _ => (),
