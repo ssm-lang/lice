@@ -1,11 +1,11 @@
 use crate::comb::{Combinator, Expr, Index, Prim, Program, Turner};
 use petgraph::{
     stable_graph::{self, DefaultIx, StableGraph},
-    visit::{Dfs, EdgeRef, VisitMap, Visitable},
+    visit::{Dfs, DfsPostOrder, EdgeRef, VisitMap, Visitable},
     Directed,
     Direction::{self, Incoming, Outgoing},
 };
-use std::{cell::Cell, mem};
+use std::{cell::Cell, collections::HashMap, mem};
 
 #[derive(Debug, Clone)]
 pub struct CombNode<T> {
@@ -175,6 +175,41 @@ impl<T: Clone> CombGraph<T> {
         }
     }
 
+    pub fn app_edges(&self, app: NodeIndex) -> (EdgeReference, EdgeReference) {
+        let mut outgoing = self.g.edges_directed(app, Outgoing);
+        let first = outgoing
+            .next()
+            .expect("App node should have at least one out-edge");
+        let second = outgoing
+            .next()
+            .expect("App node should have at least two out-edges");
+        assert!(
+            outgoing.next().is_none(),
+            "App node should have exactly two out-edges"
+        );
+        match (first.weight(), second.weight()) {
+            (CombEdge::Fun, CombEdge::Arg) => (first, second),
+            (CombEdge::Arg, CombEdge::Fun) => (second, first),
+            fs => {
+                panic!(
+                        "App node should have a Fun out-edge and an Arg out-edge, instead found {fs:#?}"
+                    );
+            }
+        }
+    }
+
+    pub fn ref_edge(&self, refn: NodeIndex) -> EdgeReference {
+        let mut outgoing = self.g.edges_directed(refn, Outgoing);
+        let edge = outgoing
+            .next()
+            .expect("Ref node should have at least one out-edge");
+        assert!(
+            outgoing.next().is_none(),
+            "Ref node should have exactly one out-edge"
+        );
+        edge
+    }
+
     pub fn collect_redex(&self, top: NodeIndex, comb: Turner) -> Vec<NodeIndex> {
         let mut args = Vec::new();
 
@@ -186,33 +221,9 @@ impl<T: Clone> CombGraph<T> {
                 self.g[app].expr
             );
 
-            let mut outgoing = self.g.edges_directed(app, Outgoing);
-            let first = outgoing
-                .next()
-                .expect("App node should have at least one out-edge");
-            let second = outgoing
-                .next()
-                .expect("App node should have at least two out-edges");
-            assert!(
-                outgoing.next().is_none(),
-                "App node should have exactly two out-edges"
-            );
-
-            match (first.weight(), second.weight()) {
-                (CombEdge::Fun, CombEdge::Arg) => {
-                    app = first.target();
-                    args.push(second.target());
-                }
-                (CombEdge::Arg, CombEdge::Fun) => {
-                    app = second.target();
-                    args.push(first.target());
-                }
-                fs => {
-                    panic!(
-                        "App node should have a Fun out-edge and an Arg out-edge, instead found {fs:#?}"
-                    );
-                }
-            }
+            let (f, a) = self.app_edges(app);
+            app = f.target();
+            args.push(a.target());
         }
 
         let Expr::Prim(prim) = self.g[app].expr else {
@@ -276,6 +287,55 @@ impl<T: Clone> CombGraph<T> {
                 self.g[nx].expr,
                 self.g[nx].reachable.get()
             );
+        }
+    }
+}
+
+impl From<&CombGraph<Index>> for Program {
+    fn from(value: &CombGraph<Index>) -> Self {
+        // Mapping from graph indices to Program indices
+        let mut index: HashMap<NodeIndex, Index> = HashMap::new();
+
+        let mut defs = Vec::new();
+        let mut body = Vec::new();
+
+        let mut dfs = DfsPostOrder::new(&value.g, value.root);
+
+        while let Some(nx) = dfs.next(&value.g) {
+            // dfs is in post-order, so anything nx points to should already be defined
+
+            match &value.g[nx].expr {
+                Expr::App(_, _) => {
+                    let (f, a) = value.app_edges(nx);
+                    body.push(Expr::App(index[&f.target()], index[&a.target()]));
+                }
+                Expr::Array(_, _) => todo!("Ugh. Need to preserve order..."),
+                Expr::Ref(_) => {
+                    // Find index t of what ref edge is pointing to
+                    let t = value.ref_edge(nx);
+                    let t = index[&t.target()];
+
+                    // Find label r of t, if it is already defined
+                    let r = defs.iter().enumerate().find(|n| *n.1 == t).map(|n| n.0);
+                    let r = r.unwrap_or_else(|| {
+                        // Not already defined; define it by adding it to defs
+                        defs.push(t);
+                        defs.len() - 1
+                    });
+
+                    body.push(Expr::Ref(r))
+                }
+                // No other expression types contain references, so we just push them by value
+                e => body.push(e.clone()),
+            }
+
+            index.insert(nx, body.len() - 1);
+        }
+
+        Program {
+            body,
+            defs,
+            root: index[&value.root],
         }
     }
 }
