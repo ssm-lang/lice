@@ -1,6 +1,6 @@
 use std::{fs::File, io::Read, path::PathBuf, process, str::FromStr};
 
-use eframe::{run_native, App, CreationContext};
+use eframe::{App, CreationContext};
 use egui::Context;
 use egui_graphs::{GraphView, SettingsInteraction, SettingsNavigation, SettingsStyle};
 use lice::comb::CombFile;
@@ -19,6 +19,28 @@ impl CombApp {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn run() {
+        let c = CombFile::from_str(include_str!("../../out.comb")).unwrap_or_else(|e| {
+            error!("{e}");
+            process::exit(1);
+        });
+
+        let web_options = eframe::WebOptions::default();
+
+        wasm_bindgen_futures::spawn_local(async {
+            eframe::WebRunner::new()
+                .start(
+                    "the_canvas_id", // hardcode it
+                    web_options,
+                    Box::new(|cc| Box::new(CombApp::new(cc, c))),
+                )
+                .await
+                .expect("failed to start eframe");
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn run(filename: PathBuf) {
         let Ok(mut f) = File::open(&filename) else {
             error!("No such file or directory: {}", filename.to_string_lossy());
@@ -35,7 +57,7 @@ impl CombApp {
         });
 
         let native_options = eframe::NativeOptions::default();
-        run_native(
+        eframe::run_native(
             filename.to_str().unwrap(),
             native_options,
             Box::new(|cc| Box::new(CombApp::new(cc, c))),

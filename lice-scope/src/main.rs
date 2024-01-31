@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::app::CombApp;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
@@ -14,6 +15,7 @@ struct Cli {
     cmd: Commands,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
     /// View combinator graph in graphical UI
@@ -25,10 +27,19 @@ enum Commands {
     // Other commands: strings, redexes, dot
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     env_logger::init();
     let args = Cli::parse();
     match args.cmd {
         Commands::Graph { filename } => CombApp::run(filename),
     }
+}
+
+// When compiling to web using trunk:
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // Redirect `log` message to `console.log` and friends:
+    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+    CombApp::run();
 }
