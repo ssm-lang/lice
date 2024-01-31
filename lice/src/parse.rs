@@ -102,12 +102,12 @@ impl Program {
         }
 
         if let (i, Some(label)) = opt(preceded(char(':'), uinteger))(i).map_err(to_anyhow)? {
-            // Labels are prefix (e.g., `:123 e`), so we put the index of the next expr item
-            self.defs[label] = self.body.len();
+            // Labels are postfix (e.g., `e :123`), so we put the index of the last expr item
+            self.defs[label] = self.body.len() - 1;
 
             log::trace!(
                 "encountered item ':{label}', which will define item at index {}",
-                self.body.len()
+                self.body.len() - 1
             );
             return Ok((i, None));
         }
