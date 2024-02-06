@@ -3,7 +3,7 @@ use crate::comb::{CombFile, Expr, Index, Prim, Program, NIL_INDEX};
 use anyhow::{anyhow, bail, ensure, Result};
 use nom::{
     branch::alt,
-    bytes::complete::{is_not, take_till},
+    bytes::complete::{is_not, take_till, take_till1},
     character::{
         complete::{char, digit1, multispace0},
         is_space,
@@ -85,7 +85,7 @@ impl Program {
         stk: &mut Vec<Index>,
         i: &'i str,
     ) -> Result<(&'i str, Option<Index>)> {
-        let i = multispace0::<_, E<'i>>(i).map_err(to_anyhow)?.0;
+        let i = multispace0(i).map_err(to_anyhow)?.0;
 
         if let (i, Some(_)) = opt(char('@'))(i).map_err(to_anyhow)? {
             ensure!(stk.len() >= 2, "unexpected '@', cannot pop 2 from stack");
@@ -154,7 +154,7 @@ impl Program {
             preceded(char('^'), take_till(|c| is_space(c as u8))) // NOTE: this accepts identifiers like ^1piece
                 .map(String::from)
                 .map(Expr::Ffi),
-            take_till(|c| is_space(c as u8)).map(|s| {
+            take_till1(|c| is_space(c as u8)).map(|s| {
                 if let Ok(p) = Prim::from_str(s) {
                     Expr::Prim(p)
                 } else {
@@ -192,6 +192,12 @@ impl FromStr for CombFile {
         );
 
         let (i, size) = size(i).map_err(to_anyhow)?;
+
+        log::debug!(
+            "Parsing combinator file version: v{}.{}, with {size} definitions",
+            version.0,
+            version.1
+        );
 
         let mut program = Program {
             root: NIL_INDEX,
