@@ -8,8 +8,8 @@ license.workspace = true
 
 [dependencies]
 anyhow = { version = "1.0" }
-parse-display = { version = "0.8.2" }
-nom = { version = "7.1.3", default-features = false, features = [ "alloc" ] }
-petgraph = { version = "0.6.4" }
+parse-display = { version = "0.9" }
+nom = { version = "7.1", default-features = false, features = [ "alloc" ] }
+petgraph = { version = "0.6" }
 lice-macros = { path = "../lice-macros" }
-log = { version = "0.4.20" }
+log = { version = "0.4" }
