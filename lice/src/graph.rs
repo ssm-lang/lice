@@ -1,4 +1,5 @@
-use crate::comb::{Combinator, Expr, Index, Prim, Program, Turner};
+use crate::tag::{Combinator, Tag, Turner};
+use crate::file::{Expr, Index, Program, NIL_INDEX, NIL_LABEL};
 use petgraph::{
     stable_graph::{self, DefaultIx, StableGraph},
     visit::{Dfs, DfsPostOrder, EdgeRef, VisitMap, Visitable},
@@ -82,7 +83,7 @@ impl<T: Clone> CombGraph<T> {
         let mut visited = self.g.visit_map();
 
         for nx in self.g.externals(Outgoing) {
-            let Expr::Prim(Prim::Combinator(comb)) = &self.g[nx].expr else {
+            let Expr::Prim(Tag::Combinator(comb)) = &self.g[nx].expr else {
                 continue;
             };
 
@@ -232,7 +233,7 @@ impl<T: Clone> CombGraph<T> {
                 self.g[app].expr
             );
         };
-        assert_eq!(prim, Prim::Combinator(comb));
+        assert_eq!(prim, Tag::Combinator(comb));
         args.push(app);
         args.reverse();
         args
@@ -247,14 +248,14 @@ impl<T: Clone> CombGraph<T> {
 
     pub fn set_app(&mut self, nx: NodeIndex, f: NodeIndex, a: NodeIndex) {
         self.remove_edges(nx, Outgoing);
-        self.g[nx].expr = Expr::new_app(); // TODO: add valid indices if possible?
+        self.g[nx].expr = Expr::App(NIL_INDEX, NIL_INDEX); // TODO: add valid indices if possible?
         self.g.add_edge(nx, f, CombEdge::Fun);
         self.g.add_edge(nx, a, CombEdge::Arg);
     }
 
     pub fn set_ind(&mut self, nx: NodeIndex, tgt: NodeIndex) {
         self.remove_edges(nx, Outgoing);
-        self.g[nx].expr = Expr::new_ref(); // TODO: add valid indices if possible?
+        self.g[nx].expr = Expr::Ref(NIL_LABEL); // TODO: add valid label if possible?
         self.g.add_edge(nx, tgt, CombEdge::Ind);
     }
 

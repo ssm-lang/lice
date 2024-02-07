@@ -6,10 +6,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = [ "graph" ]
+std = []
+file = [ "std", "dep:nom" ]
+graph = [ "file", "dep:petgraph" ]
+
 [dependencies]
-anyhow = { version = "1.0" }
-parse-display = { version = "0.9" }
-nom = { version = "7.1", default-features = false, features = [ "alloc" ] }
-petgraph = { version = "0.6" }
 lice-macros = { path = "../lice-macros" }
+anyhow = { version = "1.0" }
 log = { version = "0.4" }
+parse-display = { version = "0.9" }
+nom = { version = "7.1", default-features = false, features = [ "alloc" ], optional = true }
+petgraph = { version = "0.6", optional = true }

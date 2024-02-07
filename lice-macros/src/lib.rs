@@ -150,7 +150,7 @@ impl CombinatorEnum {
         });
 
         Ok(quote! {
-            impl crate::comb::Combinator for #ident {
+            impl crate::tag::Combinator for #ident {
                 fn arity(&self) -> usize {
                     match self {
                         #(#arities),*

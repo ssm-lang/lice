@@ -1,8 +1,21 @@
-//! Combinators
-use lice_macros::Combinator;
-use parse_display::{Display, FromStr};
-
-pub use parse_display::ParseError;
+//! Combinator file parser.
+use crate::tag::Tag;
+use anyhow::{anyhow, bail, ensure, Result};
+use nom::{
+    branch::alt,
+    bytes::complete::{is_not, take_till, take_till1},
+    character::{
+        complete::{char, digit1, multispace0},
+        is_space,
+    },
+    combinator::{map_res, opt, recognize, verify},
+    multi::fold_many0,
+    number::complete::double,
+    sequence::{delimited, preceded, separated_pair},
+    IResult, Parser,
+};
+use parse_display::Display;
+use std::str::FromStr;
 
 /// Vector indices in the [`Program`] `body`.
 pub type Index = usize;
@@ -17,6 +30,7 @@ pub type Int = i64;
 pub type Float = f64;
 
 pub(crate) const NIL_INDEX: Index = Index::MAX;
+pub(crate) const NIL_LABEL: Label = Label::MAX;
 
 /// Representation for the `.comb` file format.
 ///
@@ -84,302 +98,10 @@ pub enum Expr {
     Ffi(String),
     /// Combinators and other primitives, e.g., `S` or `IO.>>=`.
     #[display("{0}")]
-    Prim(Prim),
+    Prim(Tag),
     /// Default case. Shouldn't appear, but you know, life happens.
     #[display("?!{0}")]
     Unknown(String),
-}
-
-impl Expr {
-    pub(crate) fn new_app() -> Self {
-        Self::App(NIL_INDEX, NIL_INDEX)
-    }
-
-    pub(crate) fn new_ref() -> Self {
-        Self::Ref(NIL_INDEX)
-    }
-}
-
-/// Types of primitive values (leaf nodes) that can appear in the combinator graph.
-///
-/// TODO: the following symbols are still unknown
-///   ==
-///   >=
-///   >
-///   <=
-///   <
-///   /=
-///   ==
-///   ord
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-#[display("{0}")]
-pub enum Prim {
-    Combinator(Turner),
-    BuiltIn(BuiltIn),
-    Arith(Arith),
-    Pointer(Pointer),
-    IO(IO),
-    FArith(FArith),
-    Array(Array),
-}
-
-/// Properties of combinators (which may be partially evaluated at compile time).
-///
-/// The derive macro for `Combinator` uses the `#[rule(...)]` helper attribute to recieve
-/// a specification of the reduction rule, i.e., the redex and reduct. At the moment, the macro
-/// doesn't do anything with that information other than compute the arity (number of redexes).
-pub trait Combinator {
-    /// How many arguments are needed for reduction.
-    fn arity(&self) -> usize;
-}
-
-#[derive(Combinator, Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-pub enum Turner {
-    #[rule(from = "f g x", to = "f x (g x)")]
-    S,
-
-    #[rule(from = "x y", to = "x")]
-    K,
-
-    #[rule(from = "x", to = "x")]
-    I,
-
-    #[rule(from = "f g x", to = "f (g x)")]
-    B,
-
-    #[rule(from = "f x y", to = "f y x")]
-    C,
-
-    #[rule(from = "x y", to = "y")]
-    A,
-
-    #[rule(from = "x", to = "x self")]
-    Y,
-
-    #[display("S'")]
-    #[rule(from = "c f g x", to = "c (f x) (g x)")]
-    SS,
-
-    #[display("B'")]
-    #[rule(from = "c f g x", to = "c f (g x)")]
-    BB,
-
-    #[display("C'")]
-    #[rule(from = "c f x y", to = "c (f y) x")]
-    CC,
-
-    #[rule(from = "x y f", to = "f x y")]
-    P,
-
-    #[rule(from = "y f x", to = "f x y")]
-    R,
-
-    #[rule(from = "x y z f", to = "f x y")]
-    O,
-
-    #[rule(from = "x f", to = "f x")]
-    U,
-
-    #[rule(from = "f x y", to = "f x")]
-    Z,
-
-    #[rule(from = "x y z", to = "x")]
-    K2,
-
-    #[rule(from = "x y z w", to = "x")]
-    K3,
-
-    #[rule(from = "x y z w v", to = "x")]
-    K4,
-
-    #[display("C'B")]
-    #[rule(from = "f g x y", to = "f x (g y)")]
-    CCB,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-pub enum BuiltIn {
-    #[display("error")]
-    Error,
-    #[display("noDefault")]
-    NoDefault,
-    #[display("noMatch")]
-    NoMatch,
-    #[display("seq")]
-    Seq,
-    #[display("equal")]
-    Equal,
-    #[display("sequal")]
-    SEqual,
-    #[display("compare")]
-    Compare,
-    #[display("scmp")]
-    SCmp,
-    #[display("icmp")]
-    ICmp,
-    #[display("rnf")]
-    Rnf,
-    #[display("fromUTF8")]
-    FromUtf8,
-    #[display("chr")]
-    Chr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-pub enum Arith {
-    #[display("+")]
-    Add,
-    #[display("-")]
-    Sub,
-    #[display("*")]
-    Mul,
-    #[display("quot")]
-    Quot,
-    #[display("rem")]
-    Rem,
-    #[display("subtract")]
-    Subtract,
-    #[display("uquot")]
-    UQuot,
-    #[display("urem")]
-    URem,
-    #[display("neg")]
-    Neg,
-    #[display("and")]
-    And,
-    #[display("or")]
-    Or,
-    #[display("xor")]
-    Xor,
-    #[display("inv")]
-    Inv,
-    #[display("shl")]
-    Shl,
-    #[display("shr")]
-    Shr,
-    #[display("ashr")]
-    AShr,
-    #[display("eq")]
-    Eq,
-    #[display("ne")]
-    Ne,
-    #[display("lt")]
-    Lt,
-    #[display("le")]
-    Le,
-    #[display("gt")]
-    Gt,
-    #[display("ge")]
-    Ge,
-    #[display("u<")]
-    ULt,
-    #[display("u<=")]
-    ULe,
-    #[display("u>")]
-    UGt,
-    #[display("u>=")]
-    UGe,
-    #[display("toInt")]
-    ToInt,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-pub enum Pointer {
-    #[display("p==")]
-    PEq,
-    #[display("pnull")]
-    PNull,
-    #[display("p+")]
-    PAdd,
-    #[display("p=")]
-    PSub,
-    #[display("toPtr")]
-    ToPtr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-pub enum IO {
-    #[display("IO.>>=")]
-    Bind,
-    #[display("IO.>>")]
-    Then,
-    #[display("IO.return")]
-    Return,
-    #[display("IO.serialize")]
-    Serialize,
-    #[display("IO.deserialize")]
-    Deserialize,
-    #[display("IO.stdin")]
-    StdIn,
-    #[display("IO.stdout")]
-    StdOut,
-    #[display("IO.stderr")]
-    StdErr,
-    #[display("IO.getArgs")]
-    GetArgs,
-    #[display("IO.performIO")]
-    PerformIO,
-    #[display("IO.getTimeMilli")]
-    GetTimeMilli,
-    #[display("IO.print")]
-    Print,
-    #[display("IO.catch")]
-    Catch,
-    #[display("dynsym")]
-    DynSym,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-pub enum FArith {
-    #[display("f+")]
-    FAdd,
-    #[display("f-")]
-    FSub,
-    #[display("f*")]
-    FMul,
-    #[display("f/")]
-    FDiv,
-    #[display("fneg")]
-    FNeg,
-    /// Integer to floating point conversion.
-    #[display("itof")]
-    IToF,
-    #[display("f==")]
-    Feq,
-    #[display("f/=")]
-    FNe,
-    #[display("f<")]
-    FLt,
-    #[display("f<=")]
-    FLe,
-    #[display("f>")]
-    FGt,
-    #[display("f>=")]
-    FGe,
-    #[display("fshow")]
-    FShow,
-    #[display("fread")]
-    FRead,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-pub enum Array {
-    #[display("A.alloc")]
-    Alloc,
-    #[display("A.size")]
-    Size,
-    #[display("A.read")]
-    Read,
-    #[display("A.write")]
-    Write,
-    #[display("A.==")]
-    Eq,
-    #[display("newCAStringLen")]
-    NewCAStringLen,
-    #[display("peekCAString")]
-    PeekCAString,
-    #[display("peekCAStringLen")]
-    PeekCAStringLen,
 }
 
 impl Program {
@@ -388,7 +110,6 @@ impl Program {
         if refs[i] > 1 {
             return;
         }
-        // TODO: Broken
         match &self.body[i] {
             Expr::App(f, a) => {
                 let (f, a) = (*f, *a);
@@ -489,58 +210,240 @@ impl std::fmt::Display for Program {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut refs = [0].repeat(self.body.len());
         self.count_refs(&mut refs, self.root);
-        println!("refs: {:#?}", &refs);
         let mut visited = [None].repeat(self.body.len());
         self.fmt_rpn(out, &refs, &mut visited, &mut 0, self.root)
+    }
+}
+
+/// The result of parsing. A parser monad, even. Typedef'd here for convenience.
+type Parse<'a, T> = IResult<&'a str, T>;
+
+/// Adapt `nom` errors into `anyhow` errors.
+fn to_anyhow(e: nom::Err<nom::error::Error<&str>>) -> anyhow::Error {
+    anyhow!("{e}")
+}
+
+/// Parse an unsigned integer literal.
+fn uinteger(i: &str) -> Parse<usize> {
+    map_res(digit1, |s: &str| s.parse::<usize>()).parse(i)
+}
+
+/// Parse a possibly signed integer literal.
+fn integer(i: &str) -> Parse<i64> {
+    map_res(recognize(preceded(opt(char('-')), digit1)), |s: &str| {
+        s.parse::<i64>()
+    })
+    .parse(i)
+}
+
+/// Parse a string literal.
+fn string_literal(input: &str) -> Parse<String> {
+    enum StringFragment<'a> {
+        Literal(&'a str),
+        EscapedChar(char),
+    }
+
+    let literal = verify(is_not("\"\\"), |s: &str| !s.is_empty());
+    let escaped_char = preceded(
+        char('\\'),
+        map_res(digit1, |s: &str| s.parse::<u8>()).map(|n| n as char),
+    );
+
+    let build_string = fold_many0(
+        alt((
+            // The `map` combinator runs a parser, then applies a function to the output
+            // of that parser.
+            literal.map(StringFragment::Literal),
+            escaped_char.map(StringFragment::EscapedChar),
+        )),
+        // Our init value, an empty string
+        String::new,
+        // Our folding function. For each fragment, append the fragment to the
+        // string.
+        |mut string, fragment| {
+            match fragment {
+                StringFragment::Literal(s) => string.push_str(s),
+                StringFragment::EscapedChar(c) => string.push(c),
+            }
+            string
+        },
+    );
+    delimited(char('"'), build_string, char('"')).parse(input)
+}
+
+impl Program {
+    /// Parse an expression; this function is recursive.
+    fn parse_item<'i>(
+        &mut self,
+        stk: &mut Vec<Index>,
+        i: &'i str,
+    ) -> Result<(&'i str, Option<Index>)> {
+        let i = multispace0(i).map_err(to_anyhow)?.0;
+
+        if let (i, Some(_)) = opt(char('@'))(i).map_err(to_anyhow)? {
+            ensure!(stk.len() >= 2, "unexpected '@', cannot pop 2 from stack");
+            let a = stk.pop().unwrap(); // safe due to above bounds check
+            let f = stk.pop().unwrap(); // safe due to above bounds check
+
+            log::trace!(
+                "encountered item '@', stored at index {}, applying {f} to {a}",
+                self.body.len()
+            );
+            self.body.push(Expr::App(f, a));
+            stk.push(self.body.len() - 1);
+            return Ok((i, None));
+        }
+
+        if let (i, Some(label)) = opt(preceded(char(':'), uinteger))(i).map_err(to_anyhow)? {
+            // Labels are postfix (e.g., `e :123`), so we put the index of the last expr item
+            self.defs[label] = self.body.len() - 1;
+
+            log::trace!(
+                "encountered item ':{label}', which will define item at index {}",
+                self.body.len() - 1
+            );
+            return Ok((i, None));
+        }
+
+        if let (i, Some(len)) =
+            opt(delimited(char('['), uinteger, char(']')))(i).map_err(to_anyhow)?
+        {
+            ensure!(
+                stk.len() >= len,
+                "unexpected '[{len}]', cannot pop {len} from stack"
+            );
+
+            let mut arr = Vec::new();
+            for _ in 0..len {
+                arr.push(stk.pop().unwrap()); // safe due to above bounds check
+            }
+            // Remove this logging once this is clarified
+            log::warn!("TODO: validate correct application order for postfix [{len}]");
+
+            log::trace!(
+                "encountered item '[{len}], stored at index {}",
+                self.body.len()
+            );
+            self.body.push(Expr::Array(len, arr));
+            stk.push(self.body.len() - 1);
+            return Ok((i, None));
+        }
+
+        if let (i, Some(_)) = opt(char('}'))(i).map_err(to_anyhow)? {
+            if let Some(root) = stk.pop() {
+                log::trace!("encountered EOF indicator '}}', root stored at {root}");
+                return Ok((i, Some(root)));
+            } else {
+                bail!("encountered EOF indicator '}}' with empty stack");
+            }
+        }
+
+        let (i, c) = alt((
+            preceded(char('&'), double).map(Expr::Float),
+            preceded(char('#'), integer).map(Expr::Int),
+            preceded(char('_'), uinteger).map(Expr::Ref),
+            string_literal.map(Expr::String),
+            preceded(char('!'), string_literal).map(Expr::Tick),
+            preceded(char('^'), take_till(|c| is_space(c as u8))) // NOTE: this accepts identifiers like ^1piece
+                .map(String::from)
+                .map(Expr::Ffi),
+            take_till1(|c| is_space(c as u8)).map(|s| {
+                if let Ok(p) = Tag::from_str(s) {
+                    Expr::Prim(p)
+                } else {
+                    log::warn!("encountered unknown symbol: {s}");
+                    Expr::Unknown(s.to_string())
+                }
+            }),
+        ))
+        .parse(i)
+        .map_err(to_anyhow)?;
+
+        log::trace!(
+            "encountered item '{c}', stored at index {}",
+            self.body.len()
+        );
+        self.body.push(c);
+        stk.push(self.body.len() - 1);
+        Ok((i, None))
+    }
+}
+
+impl FromStr for CombFile {
+    type Err = anyhow::Error;
+    fn from_str(i: &str) -> Result<Self> {
+        let version = preceded(char('v'), separated_pair(uinteger, char('.'), uinteger));
+        let mut version = preceded(multispace0, version);
+        let mut size = preceded(multispace0, uinteger);
+
+        let (i, version) = version(i).map_err(to_anyhow)?;
+        ensure!(
+            version.0 >= 7,
+            "expected comb file version >= 7.0, got {}.{}",
+            version.0,
+            version.1
+        );
+
+        let (i, size) = size(i).map_err(to_anyhow)?;
+
+        log::debug!(
+            "Parsing combinator file version: v{}.{}, with {size} definitions",
+            version.0,
+            version.1
+        );
+
+        let mut program = Program {
+            root: NIL_INDEX,
+            body: Vec::new(),
+            defs: Vec::new(),
+        };
+        program.defs.resize(size, NIL_INDEX);
+
+        let mut stk = Vec::new();
+        let mut ii = i;
+        let mut root = None;
+
+        while root.is_none() {
+            (ii, root) = program.parse_item(&mut stk, ii)?;
+        }
+
+        // Some sanity checks
+        ensure!(ii.trim().is_empty(), "trailing characters: {ii}");
+        ensure!(
+            stk.is_empty(),
+            "un-applied expressions in parse stack: {stk:#?}"
+        );
+
+        for (label, &def) in program.defs.iter().enumerate() {
+            ensure!(def != NIL_INDEX, "label #{label} is not initialized");
+            ensure!(
+                def < program.body.len(),
+                "label #{label} is out of bounds: {def}"
+            );
+        }
+
+        program.root = root.unwrap(); // Safe due to check in while loop
+
+        Ok(Self {
+            version,
+            size,
+            program,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+    use crate::tag::*;
 
     macro_rules! Prim {
         (Turner::$id:ident) => {
-            Prim::Combinator(Turner::$id)
+            Tag::Combinator(Turner::$id)
         };
         ($kind:ident::$id:ident) => {
-            Prim::$kind($kind::$id)
+            Tag::$kind($kind::$id)
         };
-    }
-    const PRIMS: &[(Prim, &str)] = &[
-        (Prim!(Turner::A), "A"),
-        (Prim!(Turner::SS), "S'"),
-        (Prim!(Turner::CCB), "C'B"),
-        (Prim!(Turner::K2), "K2"),
-        (Prim!(BuiltIn::Error), "error"),
-        (Prim!(BuiltIn::NoDefault), "noDefault"),
-        (Prim!(Arith::Add), "+"),
-        (Prim!(Arith::Neg), "neg"),
-        (Prim!(Arith::ULe), "u<="),
-        (Prim!(Arith::ToInt), "toInt"),
-        (Prim!(IO::Bind), "IO.>>="),
-        (Prim!(IO::Return), "IO.return"),
-        (Prim!(IO::StdOut), "IO.stdout"),
-        (Prim!(IO::PerformIO), "IO.performIO"),
-        (Prim!(Array::NewCAStringLen), "newCAStringLen"),
-    ];
-
-    #[test]
-    fn display_prims() {
-        for (p, s) in PRIMS {
-            assert_eq!(p.to_string(), *s)
-        }
-    }
-
-    #[test]
-    fn parse_prims() {
-        for (p, s) in PRIMS {
-            assert_eq!(Ok(*p), s.parse());
-        }
-
-        assert!(Turner::from_str("u<=").is_err());
-        assert!(Arith::from_str("C'B").is_err());
     }
 
     /// Ints and floats
@@ -574,16 +477,16 @@ mod tests {
                 /* 0 */ Expr::App(1, 2),
                 /* 1 */ Expr::App(3, 4),
                 /* 2 */ Expr::Int(1),
-                /* 3 */ Expr::Prim(Prim::Combinator(Turner::A)),
-                /* 4 */ Expr::Prim(Prim::Combinator(Turner::B)),
-                /* 5 */ Expr::Prim(Prim::Combinator(Turner::I)), // unreachable
+                /* 3 */ Expr::Prim(Tag::Combinator(Turner::A)),
+                /* 4 */ Expr::Prim(Tag::Combinator(Turner::B)),
+                /* 5 */ Expr::Prim(Tag::Combinator(Turner::I)), // unreachable
             ],
             defs: vec![],
         };
         assert_eq!(p.to_string(), "A B @ #1 @ }");
 
-        p.body[3] = Expr::Prim(Prim::Combinator(Turner::K4));
-        p.body[4] = Expr::Prim(Prim::Combinator(Turner::SS));
+        p.body[3] = Expr::Prim(Tag::Combinator(Turner::K4));
+        p.body[4] = Expr::Prim(Tag::Combinator(Turner::SS));
         p.body[5] = p.body[0].clone();
         p.root = 5;
         assert_eq!(p.to_string(), "K4 S' @ #1 @ }");
@@ -727,4 +630,6 @@ mod tests {
         };
         assert_eq!(p.to_string(), "_0 I @ :0 }");
     }
+
+    // TODO: parse tests
 }

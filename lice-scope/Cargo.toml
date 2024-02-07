@@ -7,14 +7,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lice = { path = "../lice" }
-egui_graphs = { version = "0.17.1", features = [ "egui_persistence" ] }
-egui = { version = "0.24.1", features = [ "persistence" ] }
-eframe = { version = "0.24.1" }
-petgraph = { version = "0.6.4" }
-clap = { version = "4.4.12", features = ["derive"] }
-log = { version = "0.4.20" }
-env_logger = { version = "0.10.1" }
+lice = { path = "../lice", features = [ "graph" ] }
+egui_graphs = { version = "0.18", features = [ "egui_persistence", "serde" ] }
+egui = { version = "0.25", features = [ "persistence" ] }
+eframe = { version = "0.25" }
+petgraph = { version = "0.6" }
+clap = { version = "4.4", features = ["derive"] }
+log = { version = "0.4" }
+env_logger = { version = "0.11" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"

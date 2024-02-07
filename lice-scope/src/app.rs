@@ -3,7 +3,7 @@ use std::{fs::File, io::Read, path::PathBuf, process, str::FromStr};
 use eframe::{App, CreationContext};
 use egui::Context;
 use egui_graphs::{GraphView, SettingsInteraction, SettingsNavigation, SettingsStyle};
-use lice::comb::CombFile;
+use lice::file::CombFile;
 use log::error;
 
 use crate::gui::{to_gui_graph, EdgeShape, GuiGraph, NodeShape};

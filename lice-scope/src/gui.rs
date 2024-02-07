@@ -8,8 +8,9 @@ use egui_graphs::{
     Graph, Node, NodeProps,
 };
 use lice::{
-    comb::{Expr, Index, Program, Turner},
+    file::{Expr, Index, Program},
     graph::{CombEdge, CombGraph, CombIx, CombNode, CombTy, NodeIndex},
+    tag::Turner,
 };
 
 pub type GuiNode = CombNode<NodeMetadata>;
@@ -200,7 +201,7 @@ impl DisplayNode<GuiNode, GuiEdge, CombTy, CombIx> for NodeShape {
                 color,
             )
         });
-        let label_shape = TextShape::new(center - galley.size() / 2., galley);
+        let label_shape = TextShape::new(center - galley.size() / 2., galley, color);
         vec![label_shape.into()]
     }
 
