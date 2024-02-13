@@ -39,7 +39,7 @@ pub trait Combinator {
     fn arity(&self) -> usize;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Combinator)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Combinator, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "std", derive(FromStr))]
 pub enum Turner {
     #[rule(from = "f g x", to = "f x (g x)")]
