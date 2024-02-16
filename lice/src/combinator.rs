@@ -1,11 +1,22 @@
-//! Combinator tags
-use lice_macros::Combinator;
-use parse_display::Display;
+//! Definitions for combinators that appear in the combinator graph.
+
 #[cfg(feature = "std")]
-use parse_display::FromStr;
 pub use parse_display::ParseError;
 
-/// Types of primitive values (leaf nodes) that can appear in the combinator graph.
+#[cfg(feature = "rt")]
+pub use num_enum::TryFromPrimitiveError;
+
+/// Properties of combinators (which may be partially evaluated at compile time).
+///
+/// The derive macro for `Reduce` uses the `#[reduce(...)]` helper attribute to recieve
+/// a specification of the reduction rule, i.e., the redex and reduct. At the moment, the macro
+/// doesn't do anything with that information other than compute the arity (number of redexes).
+pub trait Reduce {
+    /// How many arguments are needed for reduction.
+    fn arity(&self) -> Option<usize>;
+}
+
+/// Named, primitive values applied to other nodes in a combinator graph.
 ///
 /// TODO: the following symbols are still unknown
 ///   ==
@@ -16,97 +27,65 @@ pub use parse_display::ParseError;
 ///   /=
 ///   ==
 ///   ord
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-#[display("{0}")]
-pub enum Tag {
-    Combinator(Turner),
-    BuiltIn(BuiltIn),
-    Arith(Arith),
-    Pointer(Pointer),
-    IO(IO),
-    FArith(FArith),
-    Array(Array),
-}
-
-/// Properties of combinators (which may be partially evaluated at compile time).
-///
-/// The derive macro for `Combinator` uses the `#[rule(...)]` helper attribute to recieve
-/// a specification of the reduction rule, i.e., the redex and reduct. At the moment, the macro
-/// doesn't do anything with that information other than compute the arity (number of redexes).
-pub trait Combinator {
-    /// How many arguments are needed for reduction.
-    fn arity(&self) -> usize;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, Combinator)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-pub enum Turner {
-    #[rule(from = "f g x", to = "f x (g x)")]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    lice_macros::Reduce,
+    parse_display::Display,
+    num_enum::IntoPrimitive,
+    num_enum::TryFromPrimitive,
+)]
+#[cfg_attr(feature = "std", derive(parse_display::FromStr))]
+#[cfg_attr(feature = "rt", repr(u8))]
+pub enum Combinator {
+    /*** Turner combinators ***/
+    #[reduce(from = "f g x", to = "f x (g x)")]
     S,
-
-    #[rule(from = "x y", to = "x")]
+    #[reduce(from = "x y", to = "x")]
     K,
-
-    #[rule(from = "x", to = "x")]
+    #[reduce(from = "x", to = "x")]
     I,
-
-    #[rule(from = "f g x", to = "f (g x)")]
+    #[reduce(from = "f g x", to = "f (g x)")]
     B,
-
-    #[rule(from = "f x y", to = "f y x")]
+    #[reduce(from = "f x y", to = "f y x")]
     C,
-
-    #[rule(from = "x y", to = "y")]
+    #[reduce(from = "x y", to = "y")]
     A,
-
-    #[rule(from = "x", to = "x self")]
+    #[reduce(from = "x", to = "x self")]
     Y,
-
     #[display("S'")]
-    #[rule(from = "c f g x", to = "c (f x) (g x)")]
+    #[reduce(from = "c f g x", to = "c (f x) (g x)")]
     SS,
-
     #[display("B'")]
-    #[rule(from = "c f g x", to = "c f (g x)")]
+    #[reduce(from = "c f g x", to = "c f (g x)")]
     BB,
-
     #[display("C'")]
-    #[rule(from = "c f x y", to = "c (f y) x")]
+    #[reduce(from = "c f x y", to = "c (f y) x")]
     CC,
-
-    #[rule(from = "x y f", to = "f x y")]
+    #[reduce(from = "x y f", to = "f x y")]
     P,
-
-    #[rule(from = "y f x", to = "f x y")]
+    #[reduce(from = "y f x", to = "f x y")]
     R,
-
-    #[rule(from = "x y z f", to = "f x y")]
+    #[reduce(from = "x y z f", to = "f x y")]
     O,
-
-    #[rule(from = "x f", to = "f x")]
+    #[reduce(from = "x f", to = "f x")]
     U,
-
-    #[rule(from = "f x y", to = "f x")]
+    #[reduce(from = "f x y", to = "f x")]
     Z,
-
-    #[rule(from = "x y z", to = "x")]
+    #[reduce(from = "x y z", to = "x")]
     K2,
-
-    #[rule(from = "x y z w", to = "x")]
+    #[reduce(from = "x y z w", to = "x")]
     K3,
-
-    #[rule(from = "x y z w v", to = "x")]
+    #[reduce(from = "x y z w v", to = "x")]
     K4,
-
     #[display("C'B")]
-    #[rule(from = "f g x y", to = "f x (g y)")]
+    #[reduce(from = "f g x y", to = "f x (g y)")]
     CCB,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-pub enum BuiltIn {
+    /*** Built-ins ***/
     #[display("error")]
     Error,
     #[display("noDefault")]
@@ -131,11 +110,8 @@ pub enum BuiltIn {
     FromUtf8,
     #[display("chr")]
     Chr,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-pub enum Arith {
+    /*** Integer arithmetic ***/
     #[display("+")]
     Add,
     #[display("-")]
@@ -190,11 +166,8 @@ pub enum Arith {
     UGe,
     #[display("toInt")]
     ToInt,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-pub enum Pointer {
+    /*** Pointers ***/
     #[display("p==")]
     PEq,
     #[display("pnull")]
@@ -205,11 +178,8 @@ pub enum Pointer {
     PSub,
     #[display("toPtr")]
     ToPtr,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-pub enum IO {
+    /*** IO Monad ***/
     #[display("IO.>>=")]
     Bind,
     #[display("IO.>>")]
@@ -238,11 +208,8 @@ pub enum IO {
     Catch,
     #[display("dynsym")]
     DynSym,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-pub enum FArith {
+    /*** Floating point arithmetic ***/
     #[display("f+")]
     FAdd,
     #[display("f-")]
@@ -272,11 +239,8 @@ pub enum FArith {
     FShow,
     #[display("fread")]
     FRead,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display)]
-#[cfg_attr(feature = "std", derive(FromStr))]
-pub enum Array {
+    /*** Arrays ***/
     #[display("A.alloc")]
     Alloc,
     #[display("A.size")]
@@ -286,7 +250,7 @@ pub enum Array {
     #[display("A.write")]
     Write,
     #[display("A.==")]
-    Eq,
+    CAEq,
     #[display("newCAStringLen")]
     NewCAStringLen,
     #[display("peekCAString")]
@@ -298,38 +262,27 @@ pub enum Array {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    macro_rules! Prim {
-        (Turner::$id:ident) => {
-            Tag::Combinator(Turner::$id)
-        };
-        ($kind:ident::$id:ident) => {
-            Tag::$kind($kind::$id)
-        };
-    }
-
-    const PRIMS: &[(Tag, &str)] = &[
-        (Prim!(Turner::A), "A"),
-        (Prim!(Turner::SS), "S'"),
-        (Prim!(Turner::CCB), "C'B"),
-        (Prim!(Turner::K2), "K2"),
-        (Prim!(BuiltIn::Error), "error"),
-        (Prim!(BuiltIn::NoDefault), "noDefault"),
-        (Prim!(Arith::Add), "+"),
-        (Prim!(Arith::Neg), "neg"),
-        (Prim!(Arith::ULe), "u<="),
-        (Prim!(Arith::ToInt), "toInt"),
-        (Prim!(IO::Bind), "IO.>>="),
-        (Prim!(IO::Return), "IO.return"),
-        (Prim!(IO::StdOut), "IO.stdout"),
-        (Prim!(IO::PerformIO), "IO.performIO"),
-        (Prim!(Array::NewCAStringLen), "newCAStringLen"),
+    const PRIMS: &[(Combinator, &str)] = &[
+        (Combinator::A, "A"),
+        (Combinator::SS, "S'"),
+        (Combinator::CCB, "C'B"),
+        (Combinator::K2, "K2"),
+        (Combinator::Error, "error"),
+        (Combinator::NoDefault, "noDefault"),
+        (Combinator::Add, "+"),
+        (Combinator::Neg, "neg"),
+        (Combinator::ULe, "u<="),
+        (Combinator::ToInt, "toInt"),
+        (Combinator::Bind, "IO.>>="),
+        (Combinator::Return, "IO.return"),
+        (Combinator::StdOut, "IO.stdout"),
+        (Combinator::PerformIO, "IO.performIO"),
+        (Combinator::NewCAStringLen, "newCAStringLen"),
     ];
 
     #[test]
     fn display_prims() {
         use alloc::string::ToString;
-
         for (p, s) in PRIMS {
             assert_eq!(p.to_string(), *s)
         }
@@ -339,12 +292,10 @@ mod tests {
     #[test]
     fn parse_prims() {
         use core::str::FromStr;
-
         for (p, s) in PRIMS {
             assert_eq!(Ok(*p), s.parse());
         }
-
-        assert!(Turner::from_str("u<=").is_err());
-        assert!(Arith::from_str("C'B").is_err());
+        assert!(Combinator::from_str("u<==").is_err());
+        assert!(Combinator::from_str("CC'").is_err());
     }
 }

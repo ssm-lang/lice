@@ -1,4 +1,4 @@
-use crate::tag::{Combinator, Tag, Turner};
+use crate::combinator::{Combinator, Reduce};
 use crate::file::{Expr, Index, Program, NIL_INDEX, NIL_LABEL};
 use petgraph::{
     stable_graph::{self, DefaultIx, StableGraph},
@@ -12,7 +12,7 @@ use std::{cell::Cell, collections::HashMap, mem};
 pub struct CombNode<T> {
     pub expr: Expr,
     pub reachable: Cell<bool>,
-    pub redex: Cell<Option<Turner>>,
+    pub redex: Cell<Option<Combinator>>,
     pub meta: T,
 }
 
@@ -83,13 +83,17 @@ impl<T: Clone> CombGraph<T> {
         let mut visited = self.g.visit_map();
 
         for nx in self.g.externals(Outgoing) {
-            let Expr::Prim(Tag::Combinator(comb)) = &self.g[nx].expr else {
+            let Expr::Prim(comb) = &self.g[nx].expr else {
+                continue;
+            };
+
+            let Some(arity) = comb.arity() else {
                 continue;
             };
 
             let mut more = vec![nx];
 
-            for _ in 0..comb.arity() {
+            for _ in 0..arity {
                 let nodes: Vec<NodeIndex> = mem::take(&mut more);
                 for nx in nodes {
                     if !visited.visit(nx) {
@@ -211,11 +215,11 @@ impl<T: Clone> CombGraph<T> {
         edge
     }
 
-    pub fn collect_redex(&self, top: NodeIndex, comb: Turner) -> Vec<NodeIndex> {
+    pub fn collect_redex(&self, top: NodeIndex, comb: Combinator) -> Vec<NodeIndex> {
         let mut args = Vec::new();
 
         let mut app = top;
-        for _ in 0..comb.arity() {
+        for _ in 0..comb.arity().expect("redex should have some arity") {
             assert!(
                 matches!(self.g[app].expr, Expr::App(_, _)),
                 "expected @ node in redex, instead found {}",
@@ -233,7 +237,7 @@ impl<T: Clone> CombGraph<T> {
                 self.g[app].expr
             );
         };
-        assert_eq!(prim, Tag::Combinator(comb));
+        assert_eq!(prim, comb);
         args.push(app);
         args.reverse();
         args
@@ -267,15 +271,15 @@ impl<T: Clone> CombGraph<T> {
             };
             let args = self.collect_redex(nx, comb);
             match comb {
-                Turner::I => self.set_ind(nx, args[1]),
-                Turner::A => self.set_ind(nx, args[2]),
-                Turner::K => self.set_ind(nx, args[1]),
-                Turner::K2 => self.set_ind(nx, args[1]),
-                Turner::K3 => self.set_ind(nx, args[1]),
-                Turner::K4 => self.set_ind(nx, args[1]),
-                Turner::Z => self.set_app(nx, args[1], args[2]),
-                Turner::U => self.set_app(nx, args[2], args[1]),
-                Turner::Y => self.set_app(nx, args[1], nx),
+                Combinator::I => self.set_ind(nx, args[1]),
+                Combinator::A => self.set_ind(nx, args[2]),
+                Combinator::K => self.set_ind(nx, args[1]),
+                Combinator::K2 => self.set_ind(nx, args[1]),
+                Combinator::K3 => self.set_ind(nx, args[1]),
+                Combinator::K4 => self.set_ind(nx, args[1]),
+                Combinator::Z => self.set_app(nx, args[1], args[2]),
+                Combinator::U => self.set_app(nx, args[2], args[1]),
+                Combinator::Y => self.set_app(nx, args[1], nx),
                 _ => continue, // Not going to bother
             }
         }
