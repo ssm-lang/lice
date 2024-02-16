@@ -8,9 +8,9 @@ use egui_graphs::{
     Graph, Node, NodeProps,
 };
 use lice::{
+    combinator::Combinator,
     file::{Expr, Index, Program},
     graph::{CombEdge, CombGraph, CombIx, CombNode, CombTy, NodeIndex},
-    tag::Turner,
 };
 
 pub type GuiNode = CombNode<NodeMetadata>;
@@ -86,12 +86,12 @@ pub fn to_gui_graph(p: &Program) -> GuiGraph {
 
     // Begin: an ad hoc set of transformations that should probably be done interactively/elsewhere
     println!("Before: {} nodes", g.g.node_count());
-    // g.forward_indirections();
-    // g.mark_redexes();
-    // g.reduce_trivial();
-    // g.forward_indirections();
-    // g.mark();
-    // g.gc();
+    g.forward_indirections();
+    g.mark_redexes();
+    g.reduce_trivial();
+    g.forward_indirections();
+    g.mark();
+    g.gc();
     g.mark_redexes();
     println!("After: {} nodes", g.g.node_count());
     // End: an ad hoc set of transformations that should probably be done interactively/elsewhere
@@ -126,7 +126,7 @@ pub struct NodeShape {
     radius: f32,
     label_text: String,
     reachable: bool,
-    redex: Option<Turner>,
+    redex: Option<Combinator>,
 }
 
 #[derive(Debug, Clone)]

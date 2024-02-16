@@ -108,23 +108,23 @@ impl FromMeta for Reduct {
 
 /// Metadata attached to each combinator.
 #[derive(Debug, FromVariant, Clone)]
-#[darling(attributes(rule))]
-struct CombinatorVariant {
+#[darling(attributes(reduce))]
+struct ReduceVariant {
     ident: Ident,
-    from: SpannedValue<Redex>,
-    to: SpannedValue<Reduct>,
+    from: Option<SpannedValue<Redex>>,
+    to: Option<SpannedValue<Reduct>>,
 }
 
-/// Combinator `enum` definition.
+/// Reduce `enum` definition.
 #[derive(Debug, FromDeriveInput)]
-#[darling(attributes(rule), supports(enum_unit))]
-struct CombinatorEnum {
+#[darling(attributes(reduce), supports(enum_unit))]
+struct ReduceEnum {
     ident: Ident,
-    data: ast::Data<CombinatorVariant, ()>,
+    data: ast::Data<ReduceVariant, ()>,
 }
 
-impl CombinatorEnum {
-    /// Generate `impl Combinator for TheEnum` definition.
+impl ReduceEnum {
+    /// Generate `impl Reduce for TheEnum` definition.
     fn make_impl(&self) -> darling::Result<TokenStream> {
         let mut errors = darling::Error::accumulator();
 
@@ -135,8 +135,17 @@ impl CombinatorEnum {
 
         // First do sanity-checks (and accumulate potential errors)
         for v in variants {
-            errors.handle(v.from.check().map_err(|e| e.with_span(&v.from.span())));
-            errors.handle(v.to.check(&v.from).map_err(|e| e.with_span(&v.to.span())));
+            if let Some(from) = &v.from {
+                errors.handle(from.check().map_err(|e| e.with_span(&from.span())));
+                if let Some(to) = &v.to {
+                    errors.handle(to.check(from).map_err(|e| e.with_span(&to.span())));
+                }
+            } else if let Some(to) = &v.to {
+                errors.push(
+                    darling::Error::custom("'to' defined without 'from'".to_string())
+                        .with_span(&to.span()),
+                )
+            }
         }
 
         // No more errors possible from here on out
@@ -145,13 +154,17 @@ impl CombinatorEnum {
         // Generate `fn arity()` implementation
         let arities = variants.iter().map(|v| {
             let variant = &v.ident;
-            let arity = v.from.args.len();
-            quote!(#ident::#variant => #arity)
+            if let Some(from) = &v.from {
+                let arity = from.args.len();
+                quote!(#ident::#variant => Some(#arity))
+            } else {
+                quote!(#ident::#variant => None)
+            }
         });
 
         Ok(quote! {
-            impl crate::tag::Combinator for #ident {
-                fn arity(&self) -> usize {
+            impl crate::combinator::Reduce for #ident {
+                fn arity(&self) -> Option<usize> {
                     match self {
                         #(#arities),*
                     }
@@ -161,11 +174,11 @@ impl CombinatorEnum {
     }
 }
 
-/// Derive the `Combinator` trait implementation for an `enum` definition.
-#[proc_macro_derive(Combinator, attributes(rule))]
-pub fn combinator(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+/// Derive the `Reduce` trait implementation for an `enum` definition.
+#[proc_macro_derive(Reduce, attributes(reduce))]
+pub fn reduce(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    CombinatorEnum::from_derive_input(&input)
+    ReduceEnum::from_derive_input(&input)
         .map_or_else(Error::write_errors, |e| {
             e.make_impl().unwrap_or_else(Error::write_errors)
         })

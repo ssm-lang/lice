@@ -1,5 +1,5 @@
 //! Combinator file parser.
-use crate::tag::Tag;
+use crate::combinator::Combinator;
 use anyhow::{anyhow, bail, ensure, Result};
 use nom::{
     branch::alt,
@@ -98,7 +98,7 @@ pub enum Expr {
     Ffi(String),
     /// Combinators and other primitives, e.g., `S` or `IO.>>=`.
     #[display("{0}")]
-    Prim(Tag),
+    Prim(Combinator),
     /// Default case. Shouldn't appear, but you know, life happens.
     #[display("?!{0}")]
     Unknown(String),
@@ -348,7 +348,7 @@ impl Program {
                 .map(String::from)
                 .map(Expr::Ffi),
             take_till1(|c| is_space(c as u8)).map(|s| {
-                if let Ok(p) = Tag::from_str(s) {
+                if let Ok(p) = Combinator::from_str(s) {
                     Expr::Prim(p)
                 } else {
                     log::warn!("encountered unknown symbol: {s}");
@@ -435,16 +435,7 @@ impl FromStr for CombFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tag::*;
-
-    macro_rules! Prim {
-        (Turner::$id:ident) => {
-            Tag::Combinator(Turner::$id)
-        };
-        ($kind:ident::$id:ident) => {
-            Tag::$kind($kind::$id)
-        };
-    }
+    use crate::combinator::*;
 
     /// Ints and floats
     #[test]
@@ -477,16 +468,16 @@ mod tests {
                 /* 0 */ Expr::App(1, 2),
                 /* 1 */ Expr::App(3, 4),
                 /* 2 */ Expr::Int(1),
-                /* 3 */ Expr::Prim(Tag::Combinator(Turner::A)),
-                /* 4 */ Expr::Prim(Tag::Combinator(Turner::B)),
-                /* 5 */ Expr::Prim(Tag::Combinator(Turner::I)), // unreachable
+                /* 3 */ Expr::Prim(Combinator::A),
+                /* 4 */ Expr::Prim(Combinator::B),
+                /* 5 */ Expr::Prim(Combinator::I), // unreachable
             ],
             defs: vec![],
         };
         assert_eq!(p.to_string(), "A B @ #1 @ }");
 
-        p.body[3] = Expr::Prim(Tag::Combinator(Turner::K4));
-        p.body[4] = Expr::Prim(Tag::Combinator(Turner::SS));
+        p.body[3] = Expr::Prim(Combinator::K4);
+        p.body[4] = Expr::Prim(Combinator::SS);
         p.body[5] = p.body[0].clone();
         p.root = 5;
         assert_eq!(p.to_string(), "K4 S' @ #1 @ }");
@@ -501,8 +492,8 @@ mod tests {
                 /* 0 */ Expr::App(2, 1),
                 /* 1 */ Expr::Ref(0),
                 /* 2 */ Expr::App(3, 4),
-                /* 3 */ Expr::Prim(Prim!(Turner::A)),
-                /* 4 */ Expr::Prim(Prim!(Turner::B)),
+                /* 3 */ Expr::Prim(Combinator::A),
+                /* 4 */ Expr::Prim(Combinator::B),
             ],
             defs: vec![4],
         };
@@ -514,8 +505,8 @@ mod tests {
                 /* 0 */ Expr::App(2, 1),
                 /* 1 */ Expr::Ref(0),
                 /* 2 */ Expr::App(3, 4),
-                /* 3 */ Expr::Prim(Prim!(Turner::A)),
-                /* 4 */ Expr::Prim(Prim!(Turner::B)),
+                /* 3 */ Expr::Prim(Combinator::A),
+                /* 4 */ Expr::Prim(Combinator::B),
             ],
             defs: vec![2],
         };
@@ -529,8 +520,8 @@ mod tests {
                 /* 2 */ Expr::Ref(1),
                 /* 3 */ Expr::App(6, 5),
                 /* 4 */ Expr::Ref(0),
-                /* 5 */ Expr::Prim(Prim!(Turner::B)),
-                /* 6 */ Expr::Prim(Prim!(Turner::A)),
+                /* 5 */ Expr::Prim(Combinator::B),
+                /* 6 */ Expr::Prim(Combinator::A),
             ],
             defs: vec![/* 0 */ 6, /* 1 */ 5],
         };
@@ -549,8 +540,8 @@ mod tests {
                 /* 2 */ Expr::Ref(0),
                 /* 3 */ Expr::App(6, 5),
                 /* 4 */ Expr::Ref(0),
-                /* 5 */ Expr::Prim(Prim!(Turner::B)),
-                /* 6 */ Expr::Prim(Prim!(Turner::A)),
+                /* 5 */ Expr::Prim(Combinator::B),
+                /* 6 */ Expr::Prim(Combinator::A),
             ],
             defs: vec![/* 0 */ 6],
         };
@@ -564,8 +555,8 @@ mod tests {
                 /* 1 */ Expr::App(2, 3),
                 /* 2 */ Expr::App(5, 4),
                 /* 3 */ Expr::Ref(0),
-                /* 4 */ Expr::Prim(Prim!(Turner::B)),
-                /* 5 */ Expr::Prim(Prim!(Turner::A)),
+                /* 4 */ Expr::Prim(Combinator::B),
+                /* 5 */ Expr::Prim(Combinator::A),
             ],
             defs: vec![/* 0 */ 5],
         };
@@ -579,8 +570,8 @@ mod tests {
                 /* 1 */ Expr::App(3, 5),
                 /* _ */ Expr::App(4, 2), // garbage
                 /* 3 */ Expr::Ref(0),
-                /* 4 */ Expr::Prim(Prim!(Turner::B)),
-                /* 5 */ Expr::Prim(Prim!(Turner::A)),
+                /* 4 */ Expr::Prim(Combinator::B),
+                /* 5 */ Expr::Prim(Combinator::A),
             ],
             defs: vec![/* 0 */ 5],
         };
@@ -593,8 +584,8 @@ mod tests {
                 /* 0 */ Expr::App(1, 4),
                 /* 1 */ Expr::App(2, 4),
                 /* 2 */ Expr::App(4, 3),
-                /* 3 */ Expr::Prim(Prim!(Turner::B)),
-                /* 4 */ Expr::Prim(Prim!(Turner::A)),
+                /* 3 */ Expr::Prim(Combinator::B),
+                /* 4 */ Expr::Prim(Combinator::A),
             ],
             defs: vec![],
         };
@@ -617,7 +608,7 @@ mod tests {
         // Cycle without ref
         let p = Program {
             root: 0,
-            body: vec![Expr::App(0, 1), Expr::Prim(Prim!(Turner::I))],
+            body: vec![Expr::App(0, 1), Expr::Prim(Combinator::I)],
             defs: vec![],
         };
         assert_eq!(p.to_string(), "_0 I @ :0 }");
@@ -625,7 +616,11 @@ mod tests {
         // Cycle with ref
         let p = Program {
             root: 0,
-            body: vec![Expr::App(1, 2), Expr::Ref(0), Expr::Prim(Prim!(Turner::I))],
+            body: vec![
+                Expr::App(1, 2),
+                Expr::Ref(0),
+                Expr::Prim(Combinator::I),
+            ],
             defs: vec![0],
         };
         assert_eq!(p.to_string(), "_0 I @ :0 }");

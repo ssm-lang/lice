@@ -2,7 +2,10 @@
 
 extern crate alloc;
 
-pub mod tag;
+pub mod combinator;
+
+#[cfg(feature = "rt")]
+pub mod memory;
 
 #[cfg(feature = "file")]
 pub mod file;

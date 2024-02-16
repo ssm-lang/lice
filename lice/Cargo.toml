@@ -7,15 +7,21 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = [ "graph" ]
-std = []
+default = [ "graph", "rt" ]
+std = [ "parse-display/std", "gc-arena/std" ]
 file = [ "std", "dep:nom" ]
 graph = [ "file", "dep:petgraph" ]
+rt = [ "dep:gc-arena", "dep:thin_str", "dep:zerocopy", "dep:zerocopy-derive" ]
 
 [dependencies]
 lice-macros = { path = "../lice-macros" }
-anyhow = { version = "1.0" }
+anyhow = { version = "1.0", default-features = false }
 log = { version = "0.4" }
-parse-display = { version = "0.9" }
+parse-display = { version = "0.9", default-features = false }
 nom = { version = "7.1", default-features = false, features = [ "alloc" ], optional = true }
 petgraph = { version = "0.6", optional = true }
+gc-arena = { version = "0.5", default-features = false, optional = true }
+num_enum = { version = "0.7" }
+thin_str = { version = "0.1", optional = true }
+zerocopy = { version = "0.7", optional = true }
+zerocopy-derive = { version = "0.7", optional = true }
