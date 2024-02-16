@@ -1,7 +1,7 @@
 #![allow(non_upper_case_globals)] // Appease rust-analyzer for derive(FromPrimitive)
 
 use crate::combinator::Combinator;
-use core::{isize, marker::PhantomData, mem};
+use core::{isize, marker::PhantomData, mem, ptr};
 use gc_arena::{Collect, Gc};
 use thin_str::ThinStr;
 
@@ -38,7 +38,7 @@ type Float = f32;
 #[cfg(target_pointer_width = "64")]
 type Float = f64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 struct Word(usize);
 
@@ -64,7 +64,7 @@ impl Word {
     /// must point to a valid memory location if the lower bits are set to `Pointer::GC` or
     /// `Pointer::STATIC`.
     #[inline(always)]
-    unsafe fn to_pointer<'gc>(self) -> Option<Pointer<'gc>> {
+    unsafe fn to_pointer<'gc>(&self) -> Option<Pointer<'gc>> {
         let bits = self.stolen();
 
         if bits == Pointer::NONPTR {
@@ -85,7 +85,7 @@ impl Word {
     }
 
     #[inline(always)]
-    fn to_tag(self) -> TryFromResult<Tag> {
+    fn as_tag(&self) -> TryFromResult<Tag> {
         Tag::try_from((self.0 >> 8) as u8)
     }
 
@@ -97,12 +97,12 @@ impl Word {
     }
 
     #[inline(always)]
-    fn to_combinator(self) -> TryFromResult<Combinator> {
+    fn as_combinator(&self) -> TryFromResult<Combinator> {
         Combinator::try_from((self.0 >> 16) as u8)
     }
 
     #[inline(always)]
-    unsafe fn to_str<'gc>(self) -> &'gc str {
+    unsafe fn as_str(&self) -> &str {
         // NOTE: here we transmute `&self.0` to a `&ThinStr`, rather than `self.0` to `ThinStr`,
         // beacuse doing the latter will cause the string to be dropped when this function returns.
         let s: &ThinStr = mem::transmute(&self.0);
@@ -119,7 +119,7 @@ impl Word {
     }
 
     #[inline(always)]
-    fn to_integer(self) -> Integer {
+    fn as_integer(&self) -> Integer {
         // SAFETY: any bit pattern is a valid `Integer`.
         //
         // We use `transmute` rather than an `as` cast to ensure compilation failure in case
@@ -137,7 +137,7 @@ impl Word {
     }
 
     #[inline(always)]
-    fn to_float(self) -> Float {
+    fn as_float(&self) -> Float {
         // SAFETY: any bit pattern is some well-defined `Float` (might be `NaN` but we don't care).
         //
         // We use `transmute` rather than an `as` cast to ensure compilation failure in case
@@ -230,7 +230,7 @@ impl<'gc> Pointer<'gc> {
 
     #[inline(always)]
     pub fn from_gc(gc: Gc<'gc, PackedValue<'gc>>) -> Self {
-        let ptr = unsafe { mem::transmute(gc) };
+        let ptr = gc.as_ref();
         Self {
             ptr,
             kind: PointerKind::Gc,
@@ -239,7 +239,7 @@ impl<'gc> Pointer<'gc> {
 
     #[inline(always)]
     pub fn from_box(bx: Box<PackedValue<'gc>>) -> Self {
-        let ptr = unsafe { mem::transmute(bx) };
+        let ptr = Box::leak(bx); // Should be the same as a `mem::transmute(bx)`
         Self {
             ptr,
             kind: PointerKind::Box,
@@ -247,10 +247,9 @@ impl<'gc> Pointer<'gc> {
     }
 
     #[inline(always)]
-    pub fn from_static(bx: &'static PackedValue<'gc>) -> Self {
-        let ptr = unsafe { mem::transmute(bx) };
+    pub fn from_static(ptr: &'static PackedValue<'gc>) -> Self {
         Self {
-            ptr,
+            ptr, // No conversion needed: 'static outlives 'gc
             kind: PointerKind::Static,
         }
     }
@@ -263,39 +262,43 @@ impl<'gc> AsRef<PackedValue<'gc>> for Pointer<'gc> {
     }
 }
 
-impl<'gc> Value<'gc> {
-    #[inline(always)]
-    pub fn pack(self) -> PackedValue<'gc> {
-        match self {
-            Value::App { fun, arg } => PackedValue(
-                Word::from_pointer(fun),
-                Word::from_pointer(arg),
-                PhantomData,
-            ),
-            Value::Ref(rf) => PackedValue(
-                Word::from_tag(Tag::Ref),
-                Word::from_pointer(rf),
-                PhantomData,
-            ),
-            Value::Combinator(comb) => {
-                PackedValue(Word::from_combinator(comb), Word::arbitrary(), PhantomData)
-            }
-            Value::String(_s) => {
-                todo!("I want to prevent user from creating Value::String(), but I don't want to allocate here")
-            }
-            Value::Integer(i) => PackedValue(
-                Word::from_tag(Tag::Integer),
-                Word::from_integer(i),
-                PhantomData,
-            ),
-            Value::Float(f) => {
-                PackedValue(Word::from_tag(Tag::Float), Word::from_float(f), PhantomData)
-            }
-        }
-    }
-}
-
 impl<'gc> PackedValue<'gc> {
+    pub fn new_app(fun: Pointer<'gc>, arg: Pointer<'gc>) -> Self {
+        Self(
+            Word::from_pointer(fun),
+            Word::from_pointer(arg),
+            PhantomData,
+        )
+    }
+
+    pub fn new_ref(ptr: Pointer<'gc>) -> Self {
+        Self(
+            Word::from_tag(Tag::Ref),
+            Word::from_pointer(ptr),
+            PhantomData,
+        )
+    }
+
+    pub fn new_combinator(comb: Combinator) -> Self {
+        Self(Word::from_combinator(comb), Word::arbitrary(), PhantomData)
+    }
+
+    pub fn new_str(_s: &str) -> Self {
+        todo!("figure whether allocation should happen here or in Word")
+    }
+
+    pub fn new_integer(i: Integer) -> Self {
+        Self(
+            Word::from_tag(Tag::Integer),
+            Word::from_integer(i),
+            PhantomData,
+        )
+    }
+
+    pub fn new_float(f: Float) -> Self {
+        Self(Word::from_tag(Tag::Float), Word::from_float(f), PhantomData)
+    }
+
     #[inline(always)]
     pub fn unpack(&'gc self) -> Value<'gc> {
         if let Some(fun) = unsafe { self.0.to_pointer() } {
@@ -306,7 +309,7 @@ impl<'gc> PackedValue<'gc> {
 
         let tag = self
             .0
-            .to_tag()
+            .as_tag()
             .expect("non-application node should have valid tag");
 
         match tag {
@@ -318,13 +321,13 @@ impl<'gc> PackedValue<'gc> {
             Tag::Combinator => {
                 let comb = self
                     .0
-                    .to_combinator()
+                    .as_combinator()
                     .expect("Tag::Combinator should have valid combinator");
                 Value::Combinator(comb)
             }
-            Tag::String => Value::String(unsafe { self.1.to_str() }),
-            Tag::Integer => Value::Integer(self.1.to_integer()),
-            Tag::Float => Value::Float(self.1.to_float()),
+            Tag::String => Value::String(unsafe { self.1.as_str() }),
+            Tag::Integer => Value::Integer(self.1.as_integer()),
+            Tag::Float => Value::Float(self.1.as_float()),
         }
     }
 }
@@ -333,15 +336,15 @@ impl<'gc> Drop for PackedValue<'gc> {
     fn drop(&mut self) {
         // NOTE: we don't need to drop GC or STATIC pointers
         if self.0.stolen() == Pointer::NONPTR {
-            match self.0.to_tag().unwrap() {
-                Tag::String => {
-                    let s: ThinStr = unsafe { mem::transmute(self.0) };
-                    mem::drop(s)
-                }
-                Tag::Ref if self.1.stolen() == Pointer::BOX => {
-                    let bx: Box<PackedValue<'gc>> = unsafe { mem::transmute(self.1) };
-                    mem::drop(bx)
-                }
+            match self.0.as_tag().unwrap() {
+                Tag::String => unsafe {
+                    let s = &mut self.0 as *mut Word as *mut ThinStr;
+                    ptr::drop_in_place(s)
+                },
+                Tag::Ref if self.1.stolen() == Pointer::BOX => unsafe {
+                    let bx = &mut self.1 as *mut Word as *mut Box<PackedValue<'gc>>;
+                    ptr::drop_in_place(bx)
+                },
                 _ => (),
             }
         } else {
@@ -353,7 +356,7 @@ impl<'gc> Drop for PackedValue<'gc> {
 unsafe impl<'gc> Collect for PackedValue<'gc> {
     fn trace(&self, cc: &gc_arena::Collection) {
         if self.0.stolen() == Pointer::NONPTR {
-            if self.0.to_tag().unwrap() == Tag::Ref {
+            if self.0.as_tag().unwrap() == Tag::Ref {
                 unsafe { self.1.trace(cc) };
             }
         } else {
