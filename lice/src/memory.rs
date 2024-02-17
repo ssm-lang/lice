@@ -95,6 +95,7 @@ mod assertions {
 ///
 /// NOTE: For clarity, consider implementing this as a newtype'd `union`? (Naked `union` doesn't
 /// work because we need to implement [`Drop`]).
+#[derive(Debug, PartialEq)]
 #[repr(align(4))]
 pub struct PackedValue<'gc>(Word, Word, PhantomData<&'gc ()>);
 
@@ -234,7 +235,9 @@ impl<'gc> Drop for PackedValue<'gc> {
     fn drop(&mut self) {
         if self.0.stolen() == Pointer::NONPTR {
             match self.0.as_tag().unwrap() {
-                Tag::String => unsafe { self.1.drop_str() },
+                Tag::String => unsafe {
+                    self.1.drop_str();
+                },
                 Tag::Ref => unsafe { self.1.drop_pointer() },
                 _ => (),
             }
@@ -302,10 +305,9 @@ impl Word {
     #[inline(always)]
     unsafe fn trace_pointer(&self, cc: &gc_arena::Collection) {
         if self.stolen() == Pointer::GC {
-            let gc: &Gc<PackedValue> = unsafe { mem::transmute(self.0) };
-            gc.trace(cc);
+            Gc::from_ptr(self.0 as *const PackedValue).trace(cc)
         } else if self.stolen() == Pointer::BOX {
-            todo!("Need to trace through box pointers!")
+            (*(self.0 as *const PackedValue)).trace(cc)
         }
     }
 
@@ -313,7 +315,7 @@ impl Word {
     #[inline(always)]
     unsafe fn drop_pointer(&mut self) {
         if let Some(mut ptr) = self.to_pointer() {
-            ptr.drop_box();
+            ptr.do_drop();
         }
     }
 
@@ -421,6 +423,7 @@ impl Word {
 }
 
 /// A type-safe "view" of the contents of a [`PackedValue`].
+#[derive(Debug, PartialEq)]
 pub enum Value<'gc> {
     App {
         fun: Pointer<'gc>,
@@ -434,6 +437,7 @@ pub enum Value<'gc> {
 }
 
 /// A managed pointer type.
+#[derive(Debug, PartialEq)]
 pub struct Pointer<'gc> {
     ptr: &'gc PackedValue<'gc>,
     kind: PointerKind,
@@ -498,7 +502,7 @@ impl<'gc> Pointer<'gc> {
     }
 
     #[inline(always)]
-    pub fn drop_box(&mut self) {
+    pub fn do_drop(&mut self) {
         if matches!(self.kind, PointerKind::Box) {
             // Inverse of Box::leak(), recovers a Box<T> which is dropped here.
             let _: Box<PackedValue<'gc>> =
@@ -518,25 +522,97 @@ type TryFromResult<T> = Result<T, num_enum::TryFromPrimitiveError<T>>;
 
 #[cfg(test)]
 mod tests {
+    use gc_arena::{Arena, Rootable};
+
     use super::*;
 
-    #[cfg(feature = "rt")]
     #[test]
-    fn non_app_tag_lsb() {
-        macro_rules! check_lsb {
-            ($tag:ident) => {
-                assert_eq!(
-                    Tag::$tag as u8 & Pointer::STOLEN_MASK as u8,
-                    Pointer::NONPTR as u8,
-                    "{:#?}",
-                    Tag::$tag
-                )
-            };
-        }
-        check_lsb!(Ref);
-        check_lsb!(Combinator);
-        check_lsb!(String);
-        check_lsb!(Integer);
-        check_lsb!(Float);
+    fn make_combinator_cell() {
+        let comb = PackedValue::new_combinator(Combinator::BB);
+        assert_eq!(comb.unpack(), Value::Combinator(Combinator::BB));
+    }
+
+    #[test]
+    fn make_string_cell() {
+        // Create two separate strings to make sure we're comparing by value
+        let hello1 = "hello".to_string();
+        let hello2 = "hello".to_string();
+        let s = PackedValue::new_str(&hello1);
+        assert_eq!(s.unpack(), Value::String(&hello2));
+    }
+
+    #[test]
+    fn make_number_cell() {
+        let int = PackedValue::new_integer(42);
+        assert_eq!(int.unpack(), Value::Integer(42));
+
+        let float = PackedValue::new_float(42.0);
+        assert_eq!(float.unpack(), Value::Float(42.0));
+    }
+
+    #[test]
+    fn make_app_cell() {
+        type Root = Rootable![Vec<Gc<'_, PackedValue<'_>>>];
+        let mut arena: Arena<Root> = Arena::new(|_m| vec![]);
+
+        arena.mutate_root(|m, v| {
+            v.push(Gc::new(m, PackedValue::new_combinator(Combinator::I)));
+        });
+
+        arena.mutate_root(|m, v| {
+            v.push(Gc::new(m, PackedValue::new_str("hello")));
+        });
+
+        arena.mutate_root(|m, v| {
+            let arg = Pointer::from_gc(v[1]);
+            let fun = Pointer::from_gc(v[0]);
+            v.push(Gc::new(m, PackedValue::new_app(fun, arg)));
+        });
+
+        arena.mutate(|_m, v| {
+            let arg = Pointer::from_gc(v[1]);
+            let fun = Pointer::from_gc(v[0]);
+            assert_eq!(v[2].unpack(), Value::App { fun, arg });
+        });
+
+        arena.collect_all();
+
+        arena.mutate(|_m, v| {
+            let arg = Pointer::from_gc(v[1]);
+            let fun = Pointer::from_gc(v[0]);
+            assert_eq!(v[2].unpack(), Value::App { fun, arg });
+        });
+
+        arena.mutate_root(|_m, v| {
+            let app = v.pop().unwrap();
+            v.pop().unwrap();
+            v.pop().unwrap();
+            v.push(app);
+        });
+
+        arena.collect_all();
+
+        arena.mutate(|_m, v| {
+            let app = v[0].unpack();
+            if !matches!(
+                app,
+                Value::App {
+                    fun: _fun,
+                    arg: _arg
+                }
+            ) {
+                panic!("expected to unpack application, got: {:?}", v[0].unpack());
+            }
+        });
+
+        arena.mutate_root(|_m, v| v.clear());
+
+        arena.collect_all();
+
+        assert_eq!(
+            arena.metrics().total_allocation(),
+            0,
+            "arena should be empty after root is cleared"
+        );
     }
 }
