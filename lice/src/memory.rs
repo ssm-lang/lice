@@ -37,7 +37,6 @@ use core::{
     isize,
     mem::{self, ManuallyDrop},
     ops,
-    ptr::NonNull,
 };
 use gc_arena::{Collect, Gc};
 use num_enum::UnsafeFromPrimitive;
@@ -184,8 +183,6 @@ impl<'gc> Node<'gc> {
 }
 
 /// Cells may contain [`Gc`] pointers, which need to be traced by the collector.
-///
-/// [`Box`] pointers also need to be traced through.
 unsafe impl<'gc> Collect for Node<'gc> {
     fn trace(&self, cc: &gc_arena::Collection) {
         // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
@@ -225,9 +222,7 @@ impl<'gc> Drop for Node<'gc> {
 /// A word, the same size as a pointer, but representing various kinds of data.
 union Word<'gc> {
     word: usize,
-    gc_ptr: Gc<'gc, Node<'gc>>,
-    bx_ptr: ManuallyDrop<Box<Node<'gc>>>,
-    st_ptr: &'static Node<'static>,
+    ptr: ManuallyDrop<Pointer<'gc>>,
     string: ManuallyDrop<ThinStr>,
     int: Integer,
     float: Float,
@@ -247,31 +242,13 @@ impl<'gc> std::fmt::Debug for Word<'gc> {
 impl<'gc> From<Pointer<'gc>> for Word<'gc> {
     fn from(value: Pointer<'gc>) -> Self {
         // SAFETY: any `ptr` field in the given `Pointer` should always point to some valid memory.
+        let mut word = Word {
+            ptr: ManuallyDrop::new(value),
+        };
         unsafe {
-            match value {
-                Pointer::Gc { ptr, .. } => {
-                    let mut word = Word {
-                        gc_ptr: Gc::from_ptr(ptr.as_ptr()),
-                    };
-                    Stolen::Gc.steal_in_place(&mut word.word);
-                    word
-                }
-                Pointer::Box { ptr, .. } => {
-                    let mut word = Word {
-                        bx_ptr: ManuallyDrop::new(Box::from_raw(ptr.as_ptr())),
-                    };
-                    Stolen::Box.steal_in_place(&mut word.word);
-                    word
-                }
-                Pointer::Static { ptr, .. } => {
-                    let mut word = Word {
-                        st_ptr: ptr.as_ref(),
-                    };
-                    Stolen::Static.steal_in_place(&mut word.word);
-                    word
-                }
-            }
+            Stolen::Gc.steal_in_place(&mut word.word);
         }
+        word
     }
 }
 
@@ -298,7 +275,7 @@ impl<'gc> From<ThinStr> for Word<'gc> {
     #[must_use = "dropping this word will leak the given ThinStr"]
     fn from(value: ThinStr) -> Self {
         Self {
-            string: mem::ManuallyDrop::new(value),
+            string: ManuallyDrop::new(value),
         }
     }
 }
@@ -341,19 +318,12 @@ impl<'gc> Word<'gc> {
     #[inline(always)]
     unsafe fn as_ref(&self) -> Option<Pointer<'gc>> {
         let ptr = Word {
-            word: Stolen::unsteal(self.word),
-        };
+            word: Stolen::unsteal(self.word), // Nop for GC pointers
+        }
+        .ptr;
         Some(match self.stolen() {
             Stolen::NonPtr => return None,
-            Stolen::Gc => Pointer::Gc {
-                ptr: NonNull::from(&*ptr.gc_ptr),
-            },
-            Stolen::Box => Pointer::Box {
-                ptr: NonNull::from(&*ptr.gc_ptr),
-            },
-            Stolen::Static => Pointer::Static {
-                ptr: NonNull::from(ptr.st_ptr),
-            },
+            Stolen::Gc => ManuallyDrop::into_inner(ptr),
         })
     }
 
@@ -365,12 +335,11 @@ impl<'gc> Word<'gc> {
     /// `From<Pointer>`, `From<Tag>`, or `From<Combinator>` implementations.
     #[inline(always)]
     unsafe fn trace_as_ref(&self, cc: &gc_arena::Collection) {
-        match self.stolen() {
-            Stolen::Gc => self.gc_ptr.trace(cc),
-            Stolen::Box => (*self.bx_ptr).trace(cc),
-            // NOTE: no need to trace STATIC pointers because they should not contain GC pointers
-            Stolen::Static | Stolen::NonPtr => (),
+        if self.stolen() != Stolen::NonPtr {
+            Gc::trace(&self.ptr.ptr, cc)
         }
+        // Unimplemented: other kinds of pointers, e.g., we should trace through unique
+        // pointers
     }
 
     /// Perform drop operation for this word.
@@ -381,9 +350,12 @@ impl<'gc> Word<'gc> {
     /// `From<Pointer>`, `From<Tag>`, or `From<Combinator>` implementations.
     #[inline(always)]
     unsafe fn drop_as_ref(&mut self) {
+        /* Currently a nop, since GC pointers do not need to be dropped.
+         * If we had unique pointers, we would want to do this:
         if Stolen::Box == self.stolen() {
-            mem::ManuallyDrop::drop(&mut self.bx_ptr)
+            mem::ManuallyDrop::drop(&mut self.ptr)
         }
+        */
     }
 
     /// Read from the type tag of this word.
@@ -486,70 +458,44 @@ pub enum Value<'gc> {
     Float(Float),
 }
 
-/// A type-safe reference to a [`Node`].
+/// A reference to a [`Node`].
 ///
-/// Encapsulates one of several different types of internal pointers, and can be dererenced to
-/// a [`Node`] reference. Users should not create [`Pointer`]s using this type's constructors;
-/// instead, use its [`From`] implementations.
+/// Because `Pointer`s need to be packed into the [`Node`] union, their size must be the same size
+/// as a raw pointer:
+///
+/// ```
+/// # use lice::memory::Pointer;
+/// # use std::mem;
+/// assert_eq!(mem::size_of::<Pointer>(), mem::size_of::<usize>());
+/// ```
+///
+/// Currently, this is just a wrapper around [`Gc`] pointers, but this may eventually encapsulate
+/// several different types of internal pointers, e.g., unique [`Box`]es or `&'static` references.
+/// Those pointers will have their lowest bits tagged by the values enumerated in [`Stolen`].
 #[derive(Debug)]
-pub enum Pointer<'gc> {
-    Gc { ptr: NonNull<Node<'gc>> },
-    Box { ptr: NonNull<Node<'gc>> },
-    Static { ptr: NonNull<Node<'static>> },
+pub struct Pointer<'gc> {
+    ptr: Gc<'gc, Node<'gc>>,
 }
 
 /// Referential pointer equality.
 impl<'gc> PartialEq for Pointer<'gc> {
     fn eq(&self, other: &Self) -> bool {
-        match (&self, &other) {
-            (Pointer::Gc { ptr: this }, Pointer::Gc { ptr: that })
-            | (Pointer::Box { ptr: this }, Pointer::Box { ptr: that }) => this.eq(that),
-            (Pointer::Static { ptr: ref this }, Pointer::Static { ptr: ref that }) => this.eq(that),
-            _ => false,
-        }
+        Gc::ptr_eq(self.ptr, other.ptr)
+    }
+}
+
+/// Pointers can be dereferenced like we would expect of regular pointers.
+impl<'gc> ops::Deref for Pointer<'gc> {
+    type Target = Node<'gc>;
+    fn deref(&self) -> &Self::Target {
+        self.ptr.as_ref()
     }
 }
 
 impl<'gc> From<Gc<'gc, Node<'gc>>> for Pointer<'gc> {
     #[inline(always)]
     fn from(value: Gc<'gc, Node<'gc>>) -> Self {
-        let ptr = NonNull::new(Gc::as_ptr(value) as *mut Node<'gc>)
-            .expect("Gc pointer should be non-null");
-        Pointer::Gc { ptr }
-    }
-}
-
-impl<'gc> From<Box<Node<'gc>>> for Pointer<'gc> {
-    #[inline(always)]
-    fn from(value: Box<Node<'gc>>) -> Self {
-        let ptr = NonNull::new(Box::into_raw(value)).expect("Box pointer should be non-null");
-        Pointer::Box { ptr }
-    }
-}
-
-impl<'gc> From<&'static Node<'static>> for Pointer<'gc> {
-    #[inline(always)]
-    fn from(value: &'static Node<'static>) -> Self {
-        let ptr = NonNull::new(value as *const Node<'static> as *mut Node<'static>)
-            .expect("Static pointer should be non-null");
-        Pointer::Static { ptr }
-    }
-}
-
-impl<'gc> ops::Deref for Pointer<'gc> {
-    type Target = Node<'gc>;
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: these are all always valid pointers, so `as_ref()` is fine.
-        unsafe {
-            match self {
-                Pointer::Gc { ptr, .. } | Pointer::Box { ptr, .. } => ptr.as_ref(),
-                Pointer::Static { ptr, .. } =>
-                // SAFETY: invariance of 'gc comes from Pointer::Gc, which we can transmute away
-                {
-                    mem::transmute(ptr.as_ref())
-                }
-            }
-        }
+        Self { ptr: value }
     }
 }
 
@@ -564,7 +510,7 @@ impl<'gc> ops::Deref for Pointer<'gc> {
 /// let word: usize;
 /// # word = 0xdeadbe00;
 /// let stolen_tag: Stolen;
-/// # stolen_tag = Stolen::Static;
+/// # stolen_tag = Stolen::Gc;
 /// let stolen_word: usize = stolen_tag.steal(word);
 ///
 /// # unsafe {
@@ -579,10 +525,12 @@ impl<'gc> ops::Deref for Pointer<'gc> {
 pub enum Stolen {
     /// Lower bits of a stolen [`Gc`] pointer.
     Gc = 0b00,
+    /* Unimplemented:
     /// Lower bits of a stolen [`Box`] pointer.
     Box = 0b01,
     /// Lower bits of a stolen `&'static` pointer.
     Static = 0b10,
+    */
     /// Lower bits of a non-pointer.
     NonPtr = 0b11,
 }
