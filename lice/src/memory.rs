@@ -189,11 +189,11 @@ unsafe impl<'gc> Collect for Node<'gc> {
         unsafe {
             if self.0.stolen() == Stolen::NonPtr {
                 if self.0.tag().unwrap() == Tag::Ref {
-                    self.1.trace_as_ref(cc);
+                    self.1.ptr.trace(cc);
                 }
             } else {
-                self.0.trace_as_ref(cc);
-                self.1.trace_as_ref(cc);
+                self.0.ptr.trace(cc);
+                self.1.ptr.trace(cc);
             }
         }
     }
@@ -327,21 +327,6 @@ impl<'gc> Word<'gc> {
         })
     }
 
-    /// Trace possible garbage-collected pointers embedded in this word.
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<Pointer>`, `From<Tag>`, or `From<Combinator>` implementations.
-    #[inline(always)]
-    unsafe fn trace_as_ref(&self, cc: &gc_arena::Collection) {
-        if self.stolen() != Stolen::NonPtr {
-            Gc::trace(&self.ptr.ptr, cc)
-        }
-        // Unimplemented: other kinds of pointers, e.g., we should trace through unique
-        // pointers
-    }
-
     /// Perform drop operation for this word.
     ///
     /// # Safety
@@ -472,7 +457,8 @@ pub enum Value<'gc> {
 /// Currently, this is just a wrapper around [`Gc`] pointers, but this may eventually encapsulate
 /// several different types of internal pointers, e.g., unique [`Box`]es or `&'static` references.
 /// Those pointers will have their lowest bits tagged by the values enumerated in [`Stolen`].
-#[derive(Debug)]
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
 pub struct Pointer<'gc> {
     ptr: Gc<'gc, Node<'gc>>,
 }
