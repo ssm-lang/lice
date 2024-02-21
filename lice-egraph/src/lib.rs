@@ -77,6 +77,24 @@ fn construct_egraph(
     }
 }
 
+fn construct_program(
+    expr: &RecExpr<SKI>,
+    root: Id
+) -> Program {
+    let expr_vec = expr.as_ref();
+    let body = expr_vec.iter().map(|e| match e {
+        SKI::App([f, a]) => Expr::App(usize::from(*f), usize::from(*a)),
+        SKI::Comb(comb) => Expr::Prim(*comb),
+        SKI::Int(i) => Expr:: Int(*i),
+        _ => todo!("add more exprs")
+    }).collect();
+    Program {
+        root: usize::from(root),
+        body,
+        defs: vec![0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn program_conversion() {
+    fn program_to_egraph_then_reduce() {
         let p = Program {
             root: 6,
             body: vec![
@@ -110,7 +128,7 @@ mod tests {
             defs: vec![0],
         };
         assert_eq!(p.to_string(), "S K @ K @ #1 @ }");
-        let (root, idx_eid_map_, egraph) = program_to_egraph(&p);
+        let (root, _, egraph) = program_to_egraph(&p);
         let runner = Runner::<SKI, ()>::default()
             .with_egraph(egraph)
             .run(&ski_reductions());
@@ -118,5 +136,34 @@ mod tests {
         let extractor = Extractor::new(&runner.egraph, AstSize);
         let (_, best) = extractor.find_best(root);
         assert!(best.to_string() == "1");
+    }
+    
+    #[test]
+    fn egraph_recexpr_to_program() {
+        let p = Program {
+            root: 6,
+            body: vec![
+                /* 0 */ Expr::Prim(Combinator::S),
+                /* 1 */ Expr::Prim(Combinator::K),
+                /* 2 */ Expr::Prim(Combinator::K),
+                /* 3 */ Expr::Int(1),
+                /* 4 */ Expr::App(0, 1),
+                /* 5 */ Expr::App(4, 2),
+                /* 6 */ Expr::App(5, 3),
+            ],
+            defs: vec![0],
+        };
+        assert_eq!(p.to_string(), "S K @ K @ #1 @ }");
+        let (root, idx_eid_map, egraph) = program_to_egraph(&p);
+        let runner = Runner::<SKI, ()>::default()
+            .with_egraph(egraph)
+            .run(vec![]);
+        let extractor = Extractor::new(&runner.egraph, AstSize);
+        let (_, expr) = extractor.find_best(root);
+        println!("expr: {}", expr.to_string());
+
+        let constructed = construct_program(&expr, root);
+        println!("constructed: {:#?}", constructed);
+        assert_eq!(constructed.to_string(), "S K @ K @ #1 @ }");
     }
 }
