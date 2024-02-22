@@ -143,7 +143,7 @@ impl<'gc> Node<'gc> {
 
     /// Construct a type-safe "view" of the [`Value`] stored in this node.
     #[inline(always)]
-    pub fn unpack(&'gc self) -> Value<'gc> {
+    pub fn unpack(&self) -> Value<'_, 'gc> {
         // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
         unsafe {
             if let Some(fun) = self.0.as_ref() {
@@ -180,6 +180,21 @@ impl<'gc> Node<'gc> {
             }
         }
     }
+
+    /// Drop any contents of the node in place.
+    unsafe fn drop_in_place(&mut self) {
+        if self.0.stolen() == Stolen::NonPtr {
+            match self.0.tag().unwrap() {
+                Tag::String => self.1.drop_as_string(),
+                Tag::Ref => self.1.drop_as_ref(),
+                _ => (),
+            }
+        } else {
+            // This is an App node, which contains two pointers
+            self.0.drop_as_ref();
+            self.1.drop_as_ref();
+        }
+    }
 }
 
 /// Cells may contain [`Gc`] pointers, which need to be traced by the collector.
@@ -203,19 +218,7 @@ unsafe impl<'gc> Collect for Node<'gc> {
 impl<'gc> Drop for Node<'gc> {
     fn drop(&mut self) {
         // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
-        unsafe {
-            if self.0.stolen() == Stolen::NonPtr {
-                match self.0.tag().unwrap() {
-                    Tag::String => self.1.drop_as_string(),
-                    Tag::Ref => self.1.drop_as_ref(),
-                    _ => (),
-                }
-            } else {
-                // This is an App node, which contains two pointers
-                self.0.drop_as_ref();
-                self.1.drop_as_ref();
-            }
-        }
+        unsafe { self.drop_in_place() }
     }
 }
 
@@ -427,18 +430,21 @@ pub enum Tag {
 
 /// A type-safe "view" of the contents of a [`Node`].
 ///
+/// Values contain two lifetime parameters: `'own` and `'gc`. The former represents the lifetime of
+/// the node that this `Value` is a view of; the latter presents the lifetime of the GC arena.
+///
 /// The memory layout of this type is not compact, and is not designed to be stored in memory.
 /// Instead, it should be used as the temporary return value of [`Node::unpack()`]; if the Rust
 /// inliner and optimizer does its job, no memory will be allocated for this type.
 #[derive(Debug, PartialEq)]
-pub enum Value<'gc> {
+pub enum Value<'own, 'gc> {
     App {
         fun: Pointer<'gc>,
         arg: Pointer<'gc>,
     },
     Ref(Pointer<'gc>),
     Combinator(Combinator),
-    String(&'gc str),
+    String(&'own str),
     Integer(Integer),
     Float(Float),
 }
