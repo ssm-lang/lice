@@ -105,40 +105,60 @@ mod assertions {
 /// job, that [`Value`] never exist at runtime, and be completely inlined away.
 ///
 /// For more info, see [module documentation](self).
-#[derive(Debug)]
+#[derive(Debug, Collect)]
 #[repr(align(4))]
-pub struct Node<'gc>(Word<'gc>, Word<'gc>);
+#[collect(no_drop)]
+pub struct Node<'gc>(NodeInner<'gc>);
+
+/// Inner contents of a node.
+#[derive(Debug)]
+struct NodeInner<'gc> {
+    cdr: Word<'gc>,
+    car: Word<'gc>,
+}
 
 impl<'gc> Node<'gc> {
     /// Construct an application node from pointers to two other nodes.
     pub fn new_app(fun: Pointer<'gc>, arg: Pointer<'gc>) -> Self {
-        Self(Word::from(fun), Word::from(arg))
+        let cdr = Word::from(fun);
+        let car = Word::from(arg);
+        Self(NodeInner { cdr, car })
     }
 
     /// Construct an indirection node.
     pub fn new_ref(ptr: Pointer<'gc>) -> Self {
-        Self(Word::from(Tag::Ref), Word::from(ptr))
+        let cdr = Word::from(Tag::Ref);
+        let car = Word::from(ptr);
+        Self(NodeInner { cdr, car })
     }
 
     /// Construct a combinator constant node.
     pub fn new_combinator(comb: Combinator) -> Self {
-        Self(Word::from(comb), Word::arbitrary())
+        let cdr = Word::from(comb);
+        let car = Word::arbitrary();
+        Self(NodeInner { cdr, car })
     }
 
     /// Construct a string value node.
     pub fn new_str(s: &str) -> Self {
         let s = ThinStr::new(s);
-        Self(Word::from(Tag::String), Word::from(s))
+        let cdr = Word::from(Tag::String);
+        let car = Word::from(s);
+        Self(NodeInner { cdr, car })
     }
 
     /// Construct an integer value node.
     pub fn new_integer(i: Integer) -> Self {
-        Self(Word::from(Tag::Integer), Word::from(i))
+        let cdr = Word::from(Tag::Integer);
+        let car = Word::from(i);
+        Self(NodeInner { cdr, car })
     }
 
     /// Construct a floating point value node.
     pub fn new_float(f: Float) -> Self {
-        Self(Word::from(Tag::Float), Word::from(f))
+        let cdr = Word::from(Tag::Float);
+        let car = Word::from(f);
+        Self(NodeInner { cdr, car })
     }
 
     /// Construct a type-safe "view" of the [`Value`] stored in this node.
@@ -146,9 +166,10 @@ impl<'gc> Node<'gc> {
     pub fn unpack(&self) -> Value<'_, 'gc> {
         // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
         unsafe {
-            if let Some(fun) = self.0.as_ref() {
+            if let Some(fun) = self.0.cdr.as_ref() {
                 let arg = self
-                    .1
+                    .0
+                    .car
                     .as_ref()
                     .expect("packed application node should have two pointers");
                 return Value::App { fun, arg };
@@ -156,13 +177,15 @@ impl<'gc> Node<'gc> {
 
             let tag = self
                 .0
+                .cdr
                 .tag()
                 .expect("non-application node should have valid tag");
 
             match tag {
                 Tag::Ref => {
                     let ptr = self
-                        .1
+                        .0
+                        .car
                         .as_ref()
                         .expect("Tag::Ref should have a pointer payload");
                     Value::Ref(ptr)
@@ -170,55 +193,50 @@ impl<'gc> Node<'gc> {
                 Tag::Combinator => {
                     let comb = self
                         .0
+                        .cdr
                         .combinator()
                         .expect("Tag::Combinator should have valid combinator");
                     Value::Combinator(comb)
                 }
-                Tag::String => Value::String(self.1.as_str()),
-                Tag::Integer => Value::Integer(self.1.int),
-                Tag::Float => Value::Float(self.1.float),
+                Tag::String => Value::String(self.0.car.as_str()),
+                Tag::Integer => Value::Integer(self.0.car.int),
+                Tag::Float => Value::Float(self.0.car.float),
             }
-        }
-    }
-
-    /// Drop any contents of the node in place.
-    unsafe fn drop_in_place(&mut self) {
-        if self.0.stolen() == Stolen::NonPtr {
-            match self.0.tag().unwrap() {
-                Tag::String => self.1.drop_as_string(),
-                Tag::Ref => self.1.drop_as_ref(),
-                _ => (),
-            }
-        } else {
-            // This is an App node, which contains two pointers
-            self.0.drop_as_ref();
-            self.1.drop_as_ref();
         }
     }
 }
 
-/// Cells may contain [`Gc`] pointers, which need to be traced by the collector.
-unsafe impl<'gc> Collect for Node<'gc> {
+impl<'gc> Drop for NodeInner<'gc> {
+    fn drop(&mut self) {
+        unsafe {
+            if self.cdr.stolen() == Stolen::NonPtr {
+                match self.cdr.tag().unwrap() {
+                    Tag::String => self.car.drop_as_string(),
+                    Tag::Ref => self.car.drop_as_ref(),
+                    _ => (),
+                }
+            } else {
+                // This is an App node, which contains two pointers
+                self.cdr.drop_as_ref();
+                self.car.drop_as_ref();
+            }
+        }
+    }
+}
+
+unsafe impl<'gc> Collect for NodeInner<'gc> {
     fn trace(&self, cc: &gc_arena::Collection) {
         // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
         unsafe {
-            if self.0.stolen() == Stolen::NonPtr {
-                if self.0.tag().unwrap() == Tag::Ref {
-                    self.1.ptr.trace(cc);
+            if self.cdr.stolen() == Stolen::NonPtr {
+                if self.cdr.tag().unwrap() == Tag::Ref {
+                    self.car.ptr.trace(cc);
                 }
             } else {
-                self.0.ptr.trace(cc);
-                self.1.ptr.trace(cc);
+                self.cdr.ptr.trace(cc);
+                self.car.ptr.trace(cc);
             }
         }
-    }
-}
-
-/// Cells may own heap-allocated values, which need to be freed when the cell is dropped.
-impl<'gc> Drop for Node<'gc> {
-    fn drop(&mut self) {
-        // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
-        unsafe { self.drop_in_place() }
     }
 }
 
