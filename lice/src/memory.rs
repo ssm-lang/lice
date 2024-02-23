@@ -1,36 +1,4 @@
 //! Runtime memory layout for combinator graph reducer.
-//!
-//! [`Node`]s in the combinator graph are always at least 4-byte aligned, so we use the two least
-//! significant bits of potential pointers to [`Node`]s to determine whether it is a valid pointer,
-//! and what kind of pointer it is. Those bit patterns are enumerated by the [`Stolen`] type.
-//!
-//! The memory layout for [`Node`]s are based on the 2-word memory cells from Lennart's runtime:
-//!
-//! ```text
-//!                                    <--- MSB ----   ---- LSB --->
-//!                                    Byte3   Byte2   Byte1   Byte0
-//!  +=======+=======+=======+=======+=======+=======+=======+=======+
-//!  | these bits are only present   |       | Comb  | Tag   | Ptr   | Word0
-//!  +-------+-------+-------+-------+-------+-------+-------+-------+
-//!  | and used on 64-bit platforms  |       |       |       |       | Word1
-//!  +=======+=======+=======+=======+=======+=======+=======+=======+
-//! ```
-//!
-//! When the least significant bits of a [`Node`]'s `Ptr` field (i.e., `Word0,Byte0`) are NOT set
-//! to [`Stolen::NonPtr`], then this node is a function application node ("App node", denoted `@`),
-//! where `Word0` encodes a pointer to the function node being applied, and `Word1` encodes
-//! a pointer to the argument node.
-//!
-//! When the least significant bits of a [`Node`]'s `Ptr` field are set to [`Stolen::NonPtr`]
-//! (i.e., `0b11`), then the type [`Tag`] (and thus memory layout) of this node is to be found in
-//! the second byte of the first word, i.e., `Word0,Byte1`.
-//!
-//! In most cases, the rest of the bytes of `Word0` are unused, while `Word1` is interpreted either
-//! some kind of value (e.g., [`Integer`] or [`Float`]) or pointer (e.g., [`ThinStr`]). However,
-//! when the `Tag` is set to `Tag::Combinator`, the combinator tag value is stored in
-//! `Word0,Byte2`, with `Word1` set to some arbitrary value.
-//!
-#![allow(non_upper_case_globals)] // Appease rust-analyzer for derive(FromPrimitive)
 
 use crate::combinator::Combinator;
 use crate::string::GcString;
@@ -59,6 +27,8 @@ pub type Float = f64;
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Node<'gc>(Lock<Value<'gc>>);
+
+const _: () = assert!(std::mem::size_of::<Node>() == std::mem::size_of::<Value>());
 
 impl<'gc> Unlock for Node<'gc> {
     type Unlocked = Cell<Value<'gc>>;
@@ -119,7 +89,7 @@ pub struct Pointer<'gc> {
     ptr: Gc<'gc, Node<'gc>>,
 }
 
-impl <'gc> Pointer<'gc> {
+impl<'gc> Pointer<'gc> {
     pub fn new(mc: &Mutation<'gc>, value: Value<'gc>) -> Self {
         Gc::new(mc, Node::from(value)).into()
     }

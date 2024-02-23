@@ -87,13 +87,9 @@ impl<T: Clone> CombGraph<T> {
                 continue;
             };
 
-            let Some(arity) = comb.arity() else {
-                continue;
-            };
-
             let mut more = vec![nx];
 
-            for _ in 0..arity {
+            for _ in 0..comb.arity() {
                 let nodes: Vec<NodeIndex> = mem::take(&mut more);
                 for nx in nodes {
                     if !visited.visit(nx) {
@@ -219,7 +215,7 @@ impl<T: Clone> CombGraph<T> {
         let mut args = Vec::new();
 
         let mut app = top;
-        for _ in 0..comb.arity().expect("redex should have some arity") {
+        for _ in 0..comb.arity() {
             assert!(
                 matches!(self.g[app].expr, Expr::App(_, _)),
                 "expected @ node in redex, instead found {}",

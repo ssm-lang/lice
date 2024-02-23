@@ -113,6 +113,45 @@ struct ReduceVariant {
     ident: Ident,
     from: Option<SpannedValue<Redex>>,
     to: Option<SpannedValue<Reduct>>,
+    arity: Option<SpannedValue<usize>>,
+}
+
+impl ReduceVariant {
+    fn arity(&self) -> darling::Result<usize> {
+        match (&self.from, self.arity) {
+            (None, Some(arity)) => Ok(*arity),
+            (Some(from), None) => Ok(from.args.len()),
+            (Some(from), Some(arity)) => {
+                if from.args.len() == *arity {
+                    Ok(*arity)
+                } else {
+                    Err(darling::Error::custom(
+                        "specified arity does not match number of arguments in 'from'",
+                    )
+                    .with_span(&self.ident.span()))
+                }
+            }
+            (None, None) => {
+                Err(darling::Error::custom("no arity specified!").with_span(&self.ident.span()))
+            }
+        }
+    }
+
+    fn check(&self) -> darling::Result<()> {
+        if let Some(from) = &self.from {
+            from.check().map_err(|e| e.with_span(&from.span()))?;
+            if let Some(to) = &self.to {
+                to.check(from).map_err(|e| e.with_span(&to.span()))?;
+            }
+        } else if let Some(to) = &self.to {
+            return Err(
+                darling::Error::custom("'to' defined without 'from'".to_string())
+                    .with_span(&to.span()),
+            );
+        }
+        let _ = self.arity()?; // check that arity returns Ok()
+        Ok(())
+    }
 }
 
 /// Reduce `enum` definition.
@@ -135,17 +174,7 @@ impl ReduceEnum {
 
         // First do sanity-checks (and accumulate potential errors)
         for v in variants {
-            if let Some(from) = &v.from {
-                errors.handle(from.check().map_err(|e| e.with_span(&from.span())));
-                if let Some(to) = &v.to {
-                    errors.handle(to.check(from).map_err(|e| e.with_span(&to.span())));
-                }
-            } else if let Some(to) = &v.to {
-                errors.push(
-                    darling::Error::custom("'to' defined without 'from'".to_string())
-                        .with_span(&to.span()),
-                )
-            }
+            errors.handle(v.check());
         }
 
         // No more errors possible from here on out
@@ -154,17 +183,13 @@ impl ReduceEnum {
         // Generate `fn arity()` implementation
         let arities = variants.iter().map(|v| {
             let variant = &v.ident;
-            if let Some(from) = &v.from {
-                let arity = from.args.len();
-                quote!(#ident::#variant => Some(#arity))
-            } else {
-                quote!(#ident::#variant => None)
-            }
+            let arity = v.arity().unwrap();
+            quote!(#ident::#variant => #arity)
         });
 
         Ok(quote! {
             impl crate::combinator::Reduce for #ident {
-                fn arity(&self) -> Option<usize> {
+                fn arity(&self) -> usize {
                     match self {
                         #(#arities),*
                     }
