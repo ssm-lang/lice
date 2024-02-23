@@ -33,14 +33,9 @@
 #![allow(non_upper_case_globals)] // Appease rust-analyzer for derive(FromPrimitive)
 
 use crate::combinator::Combinator;
-use core::{
-    isize,
-    mem::{self, ManuallyDrop},
-    ops,
-};
-use gc_arena::{Collect, Gc};
-use num_enum::UnsafeFromPrimitive;
-use thin_str::ThinStr;
+use crate::string::GcString;
+use core::{cell::Cell, isize, ops};
+use gc_arena::{barrier::Unlock, lock::Lock, static_collect, Collect, Gc, Mutation};
 
 /// Typedef for integer values
 pub type Integer = isize;
@@ -54,417 +49,54 @@ pub type Float = f32;
 #[cfg(target_pointer_width = "64")]
 pub type Float = f64;
 
-/// Compile-time checks for size and alignment of low-level data structures.
-mod assertions {
-    use super::*;
-
-    const _: () = assert!(
-        mem::size_of::<usize>() >= 4,
-        "Word should be at least 4 bytes (32-bits)"
-    );
-    const _: () = assert!(
-        mem::size_of::<Word>() == mem::size_of::<usize>(),
-        "Word should be the size of a pointer"
-    );
-    const _: () = assert!(
-        mem::size_of::<Node>() == mem::size_of::<Word>() * 2,
-        "PackedValue is the size of two words (pointers)"
-    );
-    const _: () = assert!(
-        mem::align_of::<Node>() >= 4,
-        "PackedValue should have alignment of at least 4 (to allow bit-stealing)"
-    );
-
-    const _: () = assert!(
-        mem::size_of::<&'static Node>() == mem::size_of::<usize>(),
-        "&'a PackedValue should be exactly one word"
-    );
-    const _: () = assert!(
-        mem::size_of::<Box<Node>>() == mem::size_of::<Word>(),
-        "Box<PackedValue> should be exactly one word, i.e., it is just a pointer"
-    );
-    const _: () = assert!(
-        mem::size_of::<Gc<Node>>() == mem::size_of::<Word>(),
-        "Gc<PackedValue> should be exactly one word, i.e., it is just a pointer"
-    );
-}
-
 /// A node in the combinator graph.
 ///
-/// Since this type represents the low-level, in-memory representation for nodes, its fields are
-/// not exposed directly. It has the same memory footprint and layout as two pointers:
-///
-/// ```
-/// # use lice::memory::Node;
-/// # use std::mem;
-/// assert_eq!(mem::size_of::<Node>(), mem::size_of::<usize>() * 2);
-/// ```
-///
-/// Instead, this type provides an [`Self::unpack()`] method that expands into a [`Value`] that
-/// represents a type-safe "view" of what is stored in the node. If the Rust optimizer does its
-/// job, that [`Value`] never exist at runtime, and be completely inlined away.
+/// This type provides an [`Self::unpack()`] method that expands into a [`Value`] that represents
+/// a type-safe "view" of what is stored in the node. If the Rust optimizer does its job, that
+/// [`Value`] should never exist at runtime, and be completely inlined away.
 ///
 /// For more info, see [module documentation](self).
 #[derive(Debug, Collect)]
-#[repr(align(4))]
 #[collect(no_drop)]
-pub struct Node<'gc>(NodeInner<'gc>);
+pub struct Node<'gc>(Lock<Value<'gc>>);
+
+impl<'gc> Unlock for Node<'gc> {
+    type Unlocked = Cell<Value<'gc>>;
+
+    unsafe fn unlock_unchecked(&self) -> &Self::Unlocked {
+        todo!()
+    }
+}
 
 /// Inner contents of a node.
-#[derive(Debug)]
-struct NodeInner<'gc> {
-    cdr: Word<'gc>,
-    car: Word<'gc>,
-}
-
-impl<'gc> Node<'gc> {
-    /// Construct an application node from pointers to two other nodes.
-    pub fn new_app(fun: Pointer<'gc>, arg: Pointer<'gc>) -> Self {
-        let cdr = Word::from(fun);
-        let car = Word::from(arg);
-        Self(NodeInner { cdr, car })
-    }
-
-    /// Construct an indirection node.
-    pub fn new_ref(ptr: Pointer<'gc>) -> Self {
-        let cdr = Word::from(Tag::Ref);
-        let car = Word::from(ptr);
-        Self(NodeInner { cdr, car })
-    }
-
-    /// Construct a combinator constant node.
-    pub fn new_combinator(comb: Combinator) -> Self {
-        let cdr = Word::from(comb);
-        let car = Word::arbitrary();
-        Self(NodeInner { cdr, car })
-    }
-
-    /// Construct a string value node.
-    pub fn new_str(s: &str) -> Self {
-        let s = ThinStr::new(s);
-        let cdr = Word::from(Tag::String);
-        let car = Word::from(s);
-        Self(NodeInner { cdr, car })
-    }
-
-    /// Construct an integer value node.
-    pub fn new_integer(i: Integer) -> Self {
-        let cdr = Word::from(Tag::Integer);
-        let car = Word::from(i);
-        Self(NodeInner { cdr, car })
-    }
-
-    /// Construct a floating point value node.
-    pub fn new_float(f: Float) -> Self {
-        let cdr = Word::from(Tag::Float);
-        let car = Word::from(f);
-        Self(NodeInner { cdr, car })
-    }
-
-    /// Construct a type-safe "view" of the [`Value`] stored in this node.
-    #[inline(always)]
-    pub fn unpack(&self) -> Value<'_, 'gc> {
-        // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
-        unsafe {
-            if let Some(fun) = self.0.cdr.as_ref() {
-                let arg = self
-                    .0
-                    .car
-                    .as_ref()
-                    .expect("packed application node should have two pointers");
-                return Value::App { fun, arg };
-            }
-
-            let tag = self
-                .0
-                .cdr
-                .tag()
-                .expect("non-application node should have valid tag");
-
-            match tag {
-                Tag::Ref => {
-                    let ptr = self
-                        .0
-                        .car
-                        .as_ref()
-                        .expect("Tag::Ref should have a pointer payload");
-                    Value::Ref(ptr)
-                }
-                Tag::Combinator => {
-                    let comb = self
-                        .0
-                        .cdr
-                        .combinator()
-                        .expect("Tag::Combinator should have valid combinator");
-                    Value::Combinator(comb)
-                }
-                Tag::String => Value::String(self.0.car.as_str()),
-                Tag::Integer => Value::Integer(self.0.car.int),
-                Tag::Float => Value::Float(self.0.car.float),
-            }
-        }
-    }
-}
-
-impl<'gc> Drop for NodeInner<'gc> {
-    fn drop(&mut self) {
-        unsafe {
-            if self.cdr.stolen() == Stolen::NonPtr {
-                match self.cdr.tag().unwrap() {
-                    Tag::String => self.car.drop_as_string(),
-                    Tag::Ref => self.car.drop_as_ref(),
-                    _ => (),
-                }
-            } else {
-                // This is an App node, which contains two pointers
-                self.cdr.drop_as_ref();
-                self.car.drop_as_ref();
-            }
-        }
-    }
-}
-
-unsafe impl<'gc> Collect for NodeInner<'gc> {
-    fn trace(&self, cc: &gc_arena::Collection) {
-        // SAFETY: the words in this node can only be constructed using its `new_*` constructors.
-        unsafe {
-            if self.cdr.stolen() == Stolen::NonPtr {
-                if self.cdr.tag().unwrap() == Tag::Ref {
-                    self.car.ptr.trace(cc);
-                }
-            } else {
-                self.cdr.ptr.trace(cc);
-                self.car.ptr.trace(cc);
-            }
-        }
-    }
-}
-
-/// A word, the same size as a pointer, but representing various kinds of data.
-union Word<'gc> {
-    word: usize,
-    ptr: ManuallyDrop<Pointer<'gc>>,
-    string: ManuallyDrop<ThinStr>,
-    int: Integer,
-    float: Float,
-}
-
-impl<'gc> std::fmt::Debug for Word<'gc> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // SAFETY: self.word is always some valid bit-pattern.
-        match mem::size_of::<usize>() {
-            8 => f.write_fmt(format_args!("Word({:#066x})", unsafe { self.word })),
-            4 => f.write_fmt(format_args!("Word({:#034x})", unsafe { self.word })),
-            _ => unreachable!("pointers should only be 8 or 4 bytes"),
-        }
-    }
-}
-
-impl<'gc> From<Pointer<'gc>> for Word<'gc> {
-    fn from(value: Pointer<'gc>) -> Self {
-        // SAFETY: any `ptr` field in the given `Pointer` should always point to some valid memory.
-        let mut word = Word {
-            ptr: ManuallyDrop::new(value),
-        };
-        unsafe {
-            Stolen::Gc.steal_in_place(&mut word.word);
-        }
-        word
-    }
-}
-
-impl<'gc> From<Tag> for Word<'gc> {
-    fn from(tag: Tag) -> Self {
-        let tag = u8::from(tag) as usize;
-        Self {
-            word: Stolen::NonPtr.steal(tag << Self::TAG_OFFSET),
-        }
-    }
-}
-
-impl<'gc> From<Combinator> for Word<'gc> {
-    fn from(comb: Combinator) -> Self {
-        let tag = u8::from(Tag::Combinator) as usize;
-        let comb = u8::from(comb) as usize;
-        Self {
-            word: Stolen::NonPtr.steal(comb << Self::COMB_OFFSET | tag << Self::TAG_OFFSET),
-        }
-    }
-}
-
-impl<'gc> From<ThinStr> for Word<'gc> {
-    #[must_use = "dropping this word will leak the given ThinStr"]
-    fn from(value: ThinStr) -> Self {
-        Self {
-            string: ManuallyDrop::new(value),
-        }
-    }
-}
-
-impl<'gc> From<Integer> for Word<'gc> {
-    fn from(int: Integer) -> Self {
-        Self { int }
-    }
-}
-
-impl<'gc> From<Float> for Word<'gc> {
-    fn from(float: Float) -> Self {
-        Self { float }
-    }
-}
-
-impl<'gc> Word<'gc> {
-    /// Bit-offset of the tag byte
-    const TAG_OFFSET: usize = 8;
-    /// Bit offset of the combinator byte
-    const COMB_OFFSET: usize = 16;
-
-    /// Stolen bits of this word (assuming it is a packed pointer).
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<Pointer>`, `From<Tag>`, or `From<Combinator>` implementations.
-    #[inline(always)]
-    unsafe fn stolen(&self) -> Stolen {
-        Stolen::from(self.word)
-    }
-
-    /// Interpret this word as a possible packed pointer.
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<Pointer>`, `From<Tag>`, or `From<Combinator>` implementations.
-    #[inline(always)]
-    unsafe fn as_ref(&self) -> Option<Pointer<'gc>> {
-        let ptr = Word {
-            word: Stolen::unsteal(self.word), // Nop for GC pointers
-        }
-        .ptr;
-        Some(match self.stolen() {
-            Stolen::NonPtr => return None,
-            Stolen::Gc => ManuallyDrop::into_inner(ptr),
-        })
-    }
-
-    /// Perform drop operation for this word.
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<Pointer>`, `From<Tag>`, or `From<Combinator>` implementations.
-    #[inline(always)]
-    unsafe fn drop_as_ref(&mut self) {
-        /* Currently a nop, since GC pointers do not need to be dropped.
-         * If we had unique pointers, we would want to do this:
-        if Stolen::Box == self.stolen() {
-            mem::ManuallyDrop::drop(&mut self.ptr)
-        }
-        */
-    }
-
-    /// Read from the type tag of this word.
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<Tag>`, or `From<Combinator>` implementations.
-    #[inline(always)]
-    unsafe fn tag(&self) -> TryFromResult<Tag> {
-        Tag::try_from((self.word >> Self::TAG_OFFSET) as u8)
-    }
-
-    /// Read from the combinator type of this word.
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<Combinator>` implementation.
-    #[inline(always)]
-    unsafe fn combinator(&self) -> TryFromResult<Combinator> {
-        Combinator::try_from((self.word >> Self::COMB_OFFSET) as u8)
-    }
-
-    /// Obtain a string reference from this word.
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<ThinStr>` implementation.
-    #[inline(always)]
-    unsafe fn as_str(&self) -> &str {
-        self.string.as_str()
-    }
-
-    /// Drop the owned string pointed to by this word.
-    ///
-    /// # Safety
-    ///
-    /// This method is only safe if and only if this [`Word`] was constructed using its
-    /// `From<ThinStr>` implementation.
-    #[inline(always)]
-    unsafe fn drop_as_string(&mut self) {
-        mem::ManuallyDrop::drop(&mut self.string);
-    }
-
-    /// A word containing an arbitrary value.
-    #[inline(always)]
-    fn arbitrary() -> Self {
-        Self { word: 0xdeadbebe }
-    }
-}
-
-/// What kind of data is stored in a [`Node`].
-///
-/// This type is only made public for documentation purposes.
-///
-/// For more info, see [module documentation](self).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    num_enum::IntoPrimitive,
-    num_enum::TryFromPrimitive,
-)]
-#[repr(u8)]
-pub enum Tag {
-    /// An indirection node
-    Ref,
-    /// A combinator constant
-    Combinator,
-    /// A string value
-    String,
-    /// An integer value
-    Integer,
-    /// A floating point value
-    Float,
-}
-
-/// A type-safe "view" of the contents of a [`Node`].
-///
-/// Values contain two lifetime parameters: `'own` and `'gc`. The former represents the lifetime of
-/// the node that this `Value` is a view of; the latter presents the lifetime of the GC arena.
-///
-/// The memory layout of this type is not compact, and is not designed to be stored in memory.
-/// Instead, it should be used as the temporary return value of [`Node::unpack()`]; if the Rust
-/// inliner and optimizer does its job, no memory will be allocated for this type.
-#[derive(Debug, PartialEq)]
-pub enum Value<'own, 'gc> {
+#[derive(Debug, Clone, Copy, Collect, PartialEq)]
+#[collect(no_drop)]
+pub enum Value<'gc> {
     App {
         fun: Pointer<'gc>,
         arg: Pointer<'gc>,
     },
     Ref(Pointer<'gc>),
     Combinator(Combinator),
-    String(&'own str),
+    String(GcString<'gc>),
     Integer(Integer),
     Float(Float),
+}
+
+// Combinators are just constant values.
+static_collect!(Combinator);
+
+impl<'gc> Node<'gc> {
+    /// View the inner contents.
+    pub fn unpack(&self) -> Value<'gc> {
+        self.0.get()
+    }
+}
+
+impl<'gc> From<Value<'gc>> for Node<'gc> {
+    fn from(value: Value<'gc>) -> Self {
+        Self(Lock::new(value))
+    }
 }
 
 /// A reference to a [`Node`].
@@ -481,10 +113,20 @@ pub enum Value<'own, 'gc> {
 /// Currently, this is just a wrapper around [`Gc`] pointers, but this may eventually encapsulate
 /// several different types of internal pointers, e.g., unique [`Box`]es or `&'static` references.
 /// Those pointers will have their lowest bits tagged by the values enumerated in [`Stolen`].
-#[derive(Debug, Collect)]
+#[derive(Debug, Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct Pointer<'gc> {
     ptr: Gc<'gc, Node<'gc>>,
+}
+
+impl <'gc> Pointer<'gc> {
+    pub fn new(mc: &Mutation<'gc>, value: Value<'gc>) -> Self {
+        Gc::new(mc, Node::from(value)).into()
+    }
+
+    pub fn set(&self, mc: &Mutation<'gc>, value: Value<'gc>) {
+        self.ptr.unlock(mc).set(value)
+    }
 }
 
 /// Referential pointer equality.
@@ -509,77 +151,6 @@ impl<'gc> From<Gc<'gc, Node<'gc>>> for Pointer<'gc> {
     }
 }
 
-/// Bits stolen from the two least significant bits of a pointer.
-///
-/// This type is only made public for documentation purposes.
-///
-/// Obeys the following identity:
-///
-/// ```
-/// # use lice::memory::Stolen;
-/// let word: usize;
-/// # word = 0xdeadbe00;
-/// let stolen_tag: Stolen;
-/// # stolen_tag = Stolen::Gc;
-/// let stolen_word: usize = stolen_tag.steal(word);
-///
-/// # unsafe {
-/// assert_eq!(word, Stolen::unsteal(stolen_word));
-/// assert_eq!(stolen_tag, Stolen::from(stolen_word));
-/// # }
-/// ```
-///
-/// For more info, see [module documentation](self).
-#[derive(Debug, UnsafeFromPrimitive, PartialEq, Eq, Clone, Copy)]
-#[repr(u8)]
-pub enum Stolen {
-    /// Lower bits of a stolen [`Gc`] pointer.
-    Gc = 0b00,
-    /* Unimplemented:
-    /// Lower bits of a stolen [`Box`] pointer.
-    Box = 0b01,
-    /// Lower bits of a stolen `&'static` pointer.
-    Static = 0b10,
-    */
-    /// Lower bits of a non-pointer.
-    NonPtr = 0b11,
-}
-
-impl Stolen {
-    /// Mask to obtain bits stolen from a word.
-    const MASK: usize = 0b11;
-
-    /// Obtain stolen bits embedded in a word.
-    ///
-    /// # Safety
-    ///
-    /// This word must have been created using [`Self::steal`] or [`Self::steal_in_place`].
-    pub unsafe fn from(word: usize) -> Self {
-        let word = word & Self::MASK;
-        let byte = word as u8;
-        Self::unchecked_transmute_from(byte)
-    }
-
-    /// Obtain word without stolen bits.
-    pub fn unsteal(word: usize) -> usize {
-        word & !Self::MASK
-    }
-
-    /// Steal bits from a word.
-    ///
-    pub fn steal(&self, word: usize) -> usize {
-        Self::unsteal(word) | *self as u8 as usize
-    }
-
-    /// Steal bits from a word by modifying it in place.
-    pub fn steal_in_place(&self, word: &mut usize) {
-        *word = self.steal(*word);
-    }
-}
-
-/// Typedef for `enum` conversion results.
-type TryFromResult<T> = Result<T, num_enum::TryFromPrimitiveError<T>>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,7 +161,7 @@ mod tests {
         // We need to create an arena here (despite no heap allocation) because of 'gc invariance.
         type Root = Rootable![Node<'_>];
 
-        let arena: Arena<Root> = Arena::new(|_m| Node::new_combinator(Combinator::BB));
+        let arena: Arena<Root> = Arena::new(|_m| Node::from(Value::Combinator(Combinator::BB)));
         arena.mutate(|_, comb| {
             assert_eq!(comb.unpack(), Value::Combinator(Combinator::BB));
         });
@@ -604,9 +175,10 @@ mod tests {
         // Create and initialize from a stack string to ensure we're comparing by value.
         let hello = "hello".to_string();
 
-        let arena: Arena<Root> = Arena::new(|_m| Node::new_str(&hello));
-        arena.mutate(|_, s| {
-            assert_eq!(s.unpack(), Value::String("hello"));
+        let arena: Arena<Root> =
+            Arena::new(|m| Node::from(Value::String(GcString::new(m, &hello))));
+        arena.mutate(|m, s| {
+            assert_eq!(s.unpack(), Value::String(GcString::new(m, "hello")));
         });
     }
 
@@ -615,11 +187,11 @@ mod tests {
         // We need to create an arena here (despite no GC allocation) because of 'gc invariance.
         type Root = Rootable![Node<'_>];
 
-        let mut arena: Arena<Root> = Arena::new(|_m| Node::new_integer(42));
+        let mut arena: Arena<Root> = Arena::new(|_m| Node::from(Value::Integer(42)));
         arena.mutate(|_, v| assert_eq!(v.unpack(), Value::Integer(42)));
 
         arena.mutate_root(|_, v| {
-            *v = Node::new_float(64.0);
+            *v = Node::from(Value::Float(64.0));
         });
         arena.mutate(|_, v| assert_eq!(v.unpack(), Value::Float(64.0)));
     }
@@ -630,17 +202,20 @@ mod tests {
         let mut arena: Arena<Root> = Arena::new(|_m| vec![]);
 
         arena.mutate_root(|m, v| {
-            v.push(Gc::new(m, Node::new_combinator(Combinator::I)));
+            v.push(Gc::new(m, Node::from(Value::Combinator(Combinator::I))));
         });
 
         arena.mutate_root(|m, v| {
-            v.push(Gc::new(m, Node::new_str("hello")));
+            v.push(Gc::new(
+                m,
+                Node::from(Value::String(GcString::new(m, "hello"))),
+            ));
         });
 
         arena.mutate_root(|m, v| {
             let arg = Pointer::from(v[1]);
             let fun = Pointer::from(v[0]);
-            v.push(Gc::new(m, Node::new_app(fun, arg)));
+            v.push(Gc::new(m, Node::from(Value::App { fun, arg })));
         });
 
         arena.mutate(|_m, v| {
