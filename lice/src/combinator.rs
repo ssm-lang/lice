@@ -12,21 +12,24 @@ pub use num_enum::TryFromPrimitiveError;
 /// a specification of the reduction rule, i.e., the redex and reduct. At the moment, the macro
 /// doesn't do anything with that information other than compute the arity (number of redexes).
 pub trait Reduce {
+    fn strictness(&self) -> &'static [bool];
+
+    fn redux(&self) -> Option<&'static [ReduxCode]>;
+
     /// How many arguments are needed for reduction.
-    fn arity(&self) -> usize;
+    #[inline]
+    fn arity(&self) -> usize {
+        self.strictness().len()
+    }
+}
+
+pub enum ReduxCode {
+    Arg(usize),
+    Top,
+    App,
 }
 
 /// Named, primitive values applied to other nodes in a combinator graph.
-///
-/// TODO: the following symbols are still unknown
-///   ==
-///   >=
-///   >
-///   <=
-///   <
-///   /=
-///   ==
-///   ord
 #[derive(
     Debug,
     Clone,
@@ -41,7 +44,7 @@ pub trait Reduce {
 #[cfg_attr(feature = "std", derive(parse_display::FromStr))]
 #[cfg_attr(feature = "rt", repr(u8))]
 pub enum Combinator {
-    /*** Turner combinators ***/
+    /** Turner combinators **/
     #[reduce(from = "f g x", to = "f x (g x)")]
     S,
     #[reduce(from = "x y", to = "x")]
@@ -54,7 +57,7 @@ pub enum Combinator {
     C,
     #[reduce(from = "x y", to = "y")]
     A,
-    #[reduce(from = "x", to = "x self")]
+    #[reduce(from = "f", to = "f ^")]
     Y,
     #[display("S'")]
     #[reduce(from = "c f g x", to = "c (f x) (g x)")]
@@ -85,267 +88,385 @@ pub enum Combinator {
     #[reduce(from = "f g x y", to = "f x (g y)")]
     CCB,
 
-    /*** Built-ins ***/
+    /*** Strictness and errors ***/
+    #[display("seq")]
+    #[reduce(from = "!to_whnf continuation", to = "continuation")]
+    Seq,
+    /// Fully reduce argument to normal form, and return `()`.
+    ///
+    /// TODO: what is the number argument??
+    #[display("rnf")]
+    #[reduce(from = "!num !term")]
+    Rnf,
+    /// Bottom value, throws an exception with the Haskell string as the error message.
     #[display("error")]
-    #[reduce(arity = 1)]
-    Error,
+    #[reduce(from = "!msg")]
+    ErrorMsg,
+    /// Bottom value, throws an exception with the Haskell string as the error message.
     #[display("noDefault")]
-    #[reduce(arity = 1)]
+    #[reduce(from = "!msg")]
     NoDefault,
     #[display("noMatch")]
-    #[reduce(arity = 3)]
+    #[reduce(from = "!msg !line_nr !col_nr")]
     NoMatch,
-    #[display("seq")]
-    #[reduce(arity = 2)]
-    Seq,
-    #[display("equal")]
-    #[reduce(arity = 2)]
-    Equal,
-    /// String equality; same implementation as Equal
-    #[display("sequal")]
-    #[reduce(arity = 2)]
-    SEqual,
-    #[display("compare")]
-    #[reduce(arity = 2)]
-    Compare,
-    /// String comparison; same implementation as Compare
-    #[display("scmp")]
-    #[reduce(arity = 2)]
-    SCmp,
-    /// Integer comparison; same implementation as Compare
-    #[display("icmp")]
-    #[reduce(arity = 2)]
-    ICmp,
-    #[display("rnf")]
-    #[reduce(arity = 2)]
-    Rnf,
-    /// Read file contents as UTF-8 string (?)
-    #[display("fromUTF8")]
-    #[reduce(arity = 1)]
-    FromUtf8,
-    /// Convert `Int` to `Char`.
-    #[display("chr")]
-    #[reduce(arity = 1)]
-    Chr,
 
-    /*** Integer arithmetic ***/
-    #[display("+")]
-    #[reduce(arity = 2)]
-    Add,
-    #[display("-")]
-    #[reduce(arity = 2)]
-    Sub,
-    #[display("*")]
-    #[reduce(arity = 2)]
-    Mul,
-    #[display("quot")]
-    #[reduce(arity = 2)]
-    Quot,
-    #[display("rem")]
-    #[reduce(arity = 2)]
-    Rem,
-    /// The same as `flip (-)`.
-    #[display("subtract")]
-    #[reduce(arity = 2)]
-    Subtract,
-    #[display("uquot")]
-    #[reduce(arity = 2)]
-    UQuot,
-    #[display("urem")]
-    #[reduce(arity = 2)]
-    URem,
-    #[display("neg")]
-    #[reduce(arity = 1)]
-    Neg,
-    #[display("and")]
-    #[reduce(arity = 2)]
-    And,
-    #[display("or")]
-    #[reduce(arity = 2)]
-    Or,
-    #[display("xor")]
-    #[reduce(arity = 2)]
-    Xor,
-    #[display("inv")]
-    #[reduce(arity = 1)]
-    Inv,
-    #[display("shl")]
-    #[reduce(arity = 2)]
-    Shl,
-    #[display("shr")]
-    #[reduce(arity = 2)]
-    Shr,
-    #[display("ashr")]
-    #[reduce(arity = 2)]
-    AShr,
-    #[display("eq")]
-    #[reduce(arity = 2)]
-    Eq,
-    #[display("ne")]
-    #[reduce(arity = 2)]
-    Ne,
-    #[display("lt")]
-    #[reduce(arity = 2)]
-    Lt,
-    #[display("le")]
-    #[reduce(arity = 2)]
-    Le,
-    #[display("gt")]
-    #[reduce(arity = 2)]
-    Gt,
-    #[display("ge")]
-    #[reduce(arity = 2)]
-    Ge,
-    #[display("u<")]
-    #[reduce(arity = 2)]
-    ULt,
-    #[display("u<=")]
-    #[reduce(arity = 2)]
-    ULe,
-    #[display("u>")]
-    #[reduce(arity = 2)]
-    UGt,
-    #[display("u>=")]
-    #[reduce(arity = 2)]
-    UGe,
+    /** Comparisons **/
+    // TODO: clarify the types. These seem to be (partially?) overloaded.
+    #[display("equal")]
+    #[reduce(from = "!lhs !rhs")]
+    Equal,
+
+    /// String equality; same implementation as Equal
+    ///
+    /// TODO: figure out if this is for CStrings or Haskell strings.
+    #[display("sequal")]
+    #[reduce(from = "!lhs !rhs")]
+    StrEqual,
+
+    #[display("compare")]
+    #[reduce(from = "!lhs !rhs")]
+    Compare,
+
+    /// String comparison; same implementation as Compare
+    ///
+    /// TODO: figure out if this is for CStrings or Haskell strings.
+    #[display("scmp")]
+    #[reduce(from = "!lhs !rhs")]
+    StrCmp,
+
+    /// Integer comparison; same implementation as Compare
+    ///
+    /// TODO: figure out the types?? What is the diff between this and compare
+    #[display("icmp")]
+    #[reduce(from = "!lhs !rhs")]
+    IntCmp,
+
+    /** Integers **/
+
+    /// Reinterpret cast to integer.
     #[display("toInt")]
-    #[reduce(arity = 1)]
+    #[reduce(from = "!int")]
     ToInt,
 
-    /*** Pointers ***/
-    #[display("p==")]
-    #[reduce(arity = 2)]
-    PEq,
+    #[display("neg")]
+    #[reduce(from = "!int")]
+    Neg,
+    #[display("+")]
+    #[reduce(from = "!lhs !rhs")]
+    Add,
+    #[display("-")]
+    #[reduce(from = "!minuend !subtrahend")]
+    Sub,
+    /// The same as `flip (-)`.
+    #[display("subtract")]
+    #[reduce(from = "!subtrahend !minuend")]
+    Subtract,
+    #[display("*")]
+    #[reduce(from = "!lhs !rhs")]
+    Mul,
+    #[display("quot")]
+    #[reduce(from = "!dividend !divisor")]
+    Quot,
+    #[display("rem")]
+    #[reduce(from = "!dividend !divisor")]
+    Rem,
+
+    /// Signed integer equality.
+    ///
+    /// NOTE: this is not overloaded.
+    #[display("==")]
+    #[reduce(from = "!lhs !rhs")]
+    Eq,
+    #[display("/=")]
+    #[reduce(from = "!lhs !rhs")]
+    Ne,
+    #[display("<")]
+    #[reduce(from = "!lhs !rhs")]
+    Lt,
+    #[display("<=")]
+    #[reduce(from = "!lhs !rhs")]
+    Le,
+    #[display(">")]
+    #[reduce(from = "!lhs !rhs")]
+    Gt,
+    #[display(">=")]
+    #[reduce(from = "!lhs !rhs")]
+    Ge,
+
+    #[display("uquot")]
+    #[reduce(from = "!dividend !divisor")]
+    UQuot,
+    #[display("urem")]
+    #[reduce(from = "!dividend !divisor")]
+    URem,
+    #[display("u<")]
+    #[reduce(from = "!lhs !rhs")]
+    ULt,
+    #[display("u<=")]
+    #[reduce(from = "!lhs !rhs")]
+    ULe,
+    #[display("u>")]
+    #[reduce(from = "!lhs !rhs")]
+    UGt,
+    #[display("u>=")]
+    #[reduce(from = "!lhs !rhs")]
+    UGe,
+
+    /// Bitwise NOT, aka `~`.
+    #[display("inv")]
+    #[reduce(from = "!number")]
+    Inv,
+    /// Bitwise AND, aka `&`.
+    #[display("and")]
+    #[reduce(from = "!lhs !rhs")]
+    And,
+    /// Bitwise OR, aka `|`.
+    #[display("or")]
+    #[reduce(from = "!lhs !rhs")]
+    Or,
+    /// Bitwise XOR, aka `^`.
+    #[display("xor")]
+    #[reduce(from = "!lhs !rhs")]
+    Xor,
+
+    /// Shift left.
+    #[display("shl")]
+    #[reduce(from = "!number !bits")]
+    Shl,
+    /// (Logical) shift right, i.e., without sign extension.
+    #[display("shr")]
+    #[reduce(from = "!number !bits")]
+    Shr,
+    /// Arithmetic shift right, i.e., with sign extension.
+    #[display("ashr")]
+    #[reduce(from = "!number !bits")]
+    AShr,
+
+    /** Characters **/
+
+    /// Convert `Char` to `Int`.
+    #[display("ord")]
+    #[reduce(from = "!char")]
+    Ord,
+    /// Convert `Int` to `Char`.
+    #[display("chr")]
+    #[reduce(from = "!int")]
+    Chr,
+
+    /** Floats **/
+
+    /// Reinterpret cast to float.
+    #[display("toDbl")]
+    #[reduce(from = "!value")]
+    ToFloat,
+
+    /// Convert integer to float.
+    #[display("itof")]
+    #[reduce(from = "!int")]
+    IToF,
+
+    #[display("fneg")]
+    #[reduce(from = "!float")]
+    FNeg,
+    #[display("f+")]
+    #[reduce(from = "!lhs !rhs")]
+    FAdd,
+    #[display("f-")]
+    #[reduce(from = "!lhs !rhs")]
+    FSub,
+    #[display("f*")]
+    #[reduce(from = "!lhs !rhs")]
+    FMul,
+    #[display("f/")]
+    #[reduce(from = "!dividend !divisor")]
+    FDiv,
+    #[display("f==")]
+    #[reduce(from = "!lhs !rhs")]
+    FEq,
+    #[display("f/=")]
+    #[reduce(from = "!lhs !rhs")]
+    FNe,
+    #[display("f<")]
+    #[reduce(from = "!lhs !rhs")]
+    FLt,
+    #[display("f<=")]
+    #[reduce(from = "!lhs !rhs")]
+    FLe,
+    #[display("f>")]
+    #[reduce(from = "!lhs !rhs")]
+    FGt,
+    #[display("f>=")]
+    #[reduce(from = "!lhs !rhs")]
+    FGe,
+
+    /// Convert float value into a Haskell string.
+    #[display("fshow")]
+    #[reduce(from = "!float")]
+    FShow,
+    /// Parse float value from a C string.
+    #[display("fread")]
+    #[reduce(from = "!cstr")]
+    FRead,
+
+    /** Pointers **/
+
     #[display("pnull")]
-    #[reduce(arity = 0)]
+    #[reduce(constant)]
     PNull,
-    #[display("p+")]
-    #[reduce(arity = 2)]
-    PAdd,
-    #[display("p=")]
-    #[reduce(arity = 2)]
-    PSub,
     #[display("toPtr")]
-    #[reduce(arity = 1)]
+    #[reduce(from = "!value")]
     ToPtr,
+    /// Pointer cast (a nop).
+    #[display("pcast")]
+    #[reduce(from = "!ptr")]
+    PCast,
+    /// Pointer equality.
+    #[display("p==")]
+    #[reduce(from = "!lhs !rhs")]
+    PEq,
+    /// Pointer addition.
+    #[display("p+")]
+    #[reduce(from = "!base !offset")]
+    PAdd,
+    /// Pointer subtraction.
+    #[display("p-")]
+    #[reduce(from = "!lptr !rptr")]
+    PSub,
 
     /*** IO Monad ***/
-    #[display("IO.>>=")]
-    #[reduce(arity = 2)]
-    Bind,
-    #[display("IO.>>")]
-    #[reduce(arity = 2)]
-    Then,
+    /// Construct a pure computation from a value, in the IO monad.
+    ///
+    /// Has type `Monad m => a -> m a`
     #[display("IO.return")]
-    #[reduce(arity = 1)]
+    #[reduce(from = "a")]
     Return,
+    /// Monadic bind in the IO monad.
+    ///
+    /// Has type `Monad m => m a -> (a -> m b) -> m b`.
+    #[display("IO.>>=")]
+    #[reduce(from = "ma a_mb")]
+    Bind,
+    /// Kleisli-composition (?) in the IO monad.
+    ///
+    /// Has type `Monad m => (a -> m b) -> (b -> m c) -> (a -> m c)`.
+    ///
+    /// Sometimes written `>=>`, and is equivalent to `C' (>>=)`.
+    ///
+    /// This gets generated to avoid deeply nesting the left-hand side of bind operators, via the
+    /// following equivalences:
+    ///
+    /// ```text
+    /// (r >>= s) >>= q     ===     r >>= (\x -> s x >>= q)
+    ///                     ===     r >>= (C' (>>=) s q)
+    ///                     ===     r >>= (s >=> q)
+    /// ```
+    #[display("IO.C'BIND")]
+    #[reduce(from = "a_mb b_mc a")]
+    CCBind,
+    /// Sequencing in the IO monad.
+    ///
+    /// Has type `Monad m => m a -> m b -> m b`.
+    #[display("IO.>>")]
+    #[reduce(from = "ma mb")]
+    Then,
+    #[display("IO.performIO")]
+    #[reduce(from = "io_term")]
+    PerformIO,
+    /// Execute a term, and catch any thrown exception.
+    #[display("IO.catch")]
+    #[reduce(from = "!term handler")]
+    Catch,
+    /// A dynamic FFI lookup from a Haskell string.
+    #[display("dynsym")]
+    #[reduce(from = "!name")]
+    DynSym,
+
     #[display("IO.serialize")]
-    #[reduce(arity = 2)]
+    #[reduce(from = "!file_ptr term")]
     Serialize,
     #[display("IO.deserialize")]
-    #[reduce(arity = 1)]
+    #[reduce(from = "!file_ptr")]
     Deserialize,
     /// A handle to standard input.
     #[display("IO.stdin")]
-    #[reduce(arity = 0)]
+    #[reduce(constant)]
     StdIn,
     /// A handle to standard output.
     #[display("IO.stdout")]
-    #[reduce(arity = 0)]
+    #[reduce(constant)]
     StdOut,
     /// A handle to standard error.
     #[display("IO.stderr")]
-    #[reduce(arity = 0)]
+    #[reduce(constant)]
     StdErr,
-    #[display("IO.getArgs")]
-    #[reduce(arity = 0)]
-    GetArgs,
-    #[display("IO.performIO")]
-    #[reduce(arity = 1)]
-    PerformIO,
-    #[display("IO.getTimeMilli")]
-    #[reduce(arity = 0)] // FIXME: how is this evaluated?
-    GetTimeMilli,
+    /// Print a term to a file.
+    ///
+    /// FIXME: Apparently, the semantics are like `IO.serialize`, except without a header??
     #[display("IO.print")]
-    #[reduce(arity = 2)]
+    #[reduce(from = "!file_ptr !term")]
     Print,
-    #[display("IO.catch")]
-    #[reduce(arity = 2)]
-    Catch,
-    #[display("dynsym")]
-    #[reduce(arity = 1)]
-    DynSym,
-
-    /*** Floating point arithmetic ***/
-    #[display("f+")]
-    #[reduce(arity = 2)]
-    FAdd,
-    #[display("f-")]
-    #[reduce(arity = 2)]
-    FSub,
-    #[display("f*")]
-    #[reduce(arity = 2)]
-    FMul,
-    #[display("f/")]
-    #[reduce(arity = 2)]
-    FDiv,
-    #[display("fneg")]
-    #[reduce(arity = 2)]
-    FNeg,
-    /// Integer to floating point conversion.
-    #[display("itof")]
-    #[reduce(arity = 1)]
-    IToF,
-    #[display("f==")]
-    #[reduce(arity = 2)]
-    FEq,
-    #[display("f/=")]
-    #[reduce(arity = 2)]
-    FNe,
-    #[display("f<")]
-    #[reduce(arity = 2)]
-    FLt,
-    #[display("f<=")]
-    #[reduce(arity = 2)]
-    FLe,
-    #[display("f>")]
-    #[reduce(arity = 2)]
-    FGt,
-    #[display("f>=")]
-    #[reduce(arity = 2)]
-    FGe,
-    #[display("fshow")]
-    #[reduce(arity = 1)]
-    FShow,
-    #[display("fread")]
-    #[reduce(arity = 1)]
-    FRead,
+    #[display("IO.getArgs")]
+    #[reduce(constant)]
+    GetArgs,
+    #[display("IO.getTimeMilli")]
+    #[reduce(from = "FIXME")] // TODO: how is this evaluated?
+    GetTimeMilli,
 
     /*** Arrays ***/
+    /// Allocate an array of the specified size, all initialized to the given element.
     #[display("A.alloc")]
-    #[reduce(arity = 2)]
-    Alloc,
+    #[reduce(from = "!size elem")]
+    ArrAlloc,
+    /// Get the size of an array.
     #[display("A.size")]
-    #[reduce(arity = 1)]
-    Size,
+    #[reduce(from = "!arr")]
+    ArrSize,
+    /// Read an element from an array.
     #[display("A.read")]
-    #[reduce(arity = 2)]
-    Read,
+    #[reduce(from = "!arr !idx")]
+    ArrRead,
+    /// Write an element to an array.
     #[display("A.write")]
-    #[reduce(arity = 3)]
-    Write,
+    #[reduce(from = "!arr !idx elem")]
+    ArrWrite,
+    /// Array equality.
+    ///
+    /// Apparently only checks for referential equality, i.e., not deep equality.
     #[display("A.==")]
-    #[reduce(arity = 2)]
-    CAEq,
+    #[reduce(from = "!lhs !rhs")]
+    ArrEq,
+
+    /** C strings **/
+
+    /// Read a Haskell string from a UTF-8-encoded C string.
+    ///
+    /// TODO: Really ??? This doesn't seem right. How is this non-IO? Figure out what is going on.
+    #[display("fromUTF8")]
+    #[reduce(from = "!cstr")]
+    FromUtf8,
+
+    /// Construct a C string from a Haskell string, returning its length.
+    ///
+    /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("newCAStringLen")]
-    #[reduce(arity = 1)]
-    NewCAStringLen,
+    #[reduce(from = "!hstr")]
+    CStringNew,
+    /// Read a Haskell string from a C string.
+    ///
+    /// The encoding of the string depends on the encoding of the Haskell implementation.
+    ///
+    /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAString")]
-    #[reduce(arity = 1)]
-    PeekCAString,
+    #[reduce(from = "!cstr")]
+    CStringPeek,
+    /// Read a Haskell string from a C string, up to the given length.
+    ///
+    /// The encoding of the string depends on the encoding of the Haskell implementation.
+    ///
+    /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAStringLen")]
-    #[reduce(arity = 2)]
-    PeekCAStringLen,
+    #[reduce(from = "!cstr !max_len")]
+    CStringPeekLen,
 }
 
 #[cfg(test)]
@@ -356,7 +477,7 @@ mod tests {
         (Combinator::SS, "S'"),
         (Combinator::CCB, "C'B"),
         (Combinator::K2, "K2"),
-        (Combinator::Error, "error"),
+        (Combinator::ErrorMsg, "error"),
         (Combinator::NoDefault, "noDefault"),
         (Combinator::Add, "+"),
         (Combinator::Neg, "neg"),
@@ -366,7 +487,7 @@ mod tests {
         (Combinator::Return, "IO.return"),
         (Combinator::StdOut, "IO.stdout"),
         (Combinator::PerformIO, "IO.performIO"),
-        (Combinator::NewCAStringLen, "newCAStringLen"),
+        (Combinator::CStringNew, "newCAStringLen"),
     ];
 
     #[test]

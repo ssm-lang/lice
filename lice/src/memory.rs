@@ -1,21 +1,11 @@
 //! Runtime memory layout for combinator graph reducer.
 
-use crate::combinator::Combinator;
+use crate::float::Float;
 use crate::string::GcString;
-use core::{cell::Cell, isize, ops};
+use crate::{combinator::Combinator, integer::Integer};
+use core::{cell::Cell, ops};
+use derive_more::{From, TryInto, Unwrap};
 use gc_arena::{barrier::Unlock, lock::Lock, static_collect, Collect, Gc, Mutation};
-
-/// Typedef for integer values
-pub type Integer = isize;
-
-/// Typedef for floating point values
-/// TODO: only if target supports floats
-#[cfg(target_pointer_width = "32")]
-pub type Float = f32;
-
-/// Typedef for floating point values
-#[cfg(target_pointer_width = "64")]
-pub type Float = f64;
 
 /// A node in the combinator graph.
 ///
@@ -34,18 +24,22 @@ impl<'gc> Unlock for Node<'gc> {
     type Unlocked = Cell<Value<'gc>>;
 
     unsafe fn unlock_unchecked(&self) -> &Self::Unlocked {
-        todo!()
+        self.0.unlock_unchecked()
     }
 }
 
-/// Inner contents of a node.
 #[derive(Debug, Clone, Copy, Collect, PartialEq)]
 #[collect(no_drop)]
+pub struct App<'gc> {
+    pub fun: Pointer<'gc>,
+    pub arg: Pointer<'gc>,
+}
+
+/// Inner contents of a node.
+#[derive(Debug, Clone, Copy, Collect, PartialEq, From, TryInto, Unwrap)]
+#[collect(no_drop)]
 pub enum Value<'gc> {
-    App {
-        fun: Pointer<'gc>,
-        arg: Pointer<'gc>,
-    },
+    App(App<'gc>),
     Ref(Pointer<'gc>),
     Combinator(Combinator),
     String(GcString<'gc>),
@@ -56,16 +50,48 @@ pub enum Value<'gc> {
 // Combinators are just constant values.
 static_collect!(Combinator);
 
+impl<'gc> Value<'gc> {
+    pub fn whnf(&self) -> bool {
+        !matches!(self, Self::App(_) | Self::Ref(_))
+    }
+}
+
 impl<'gc> Node<'gc> {
     /// View the inner contents.
     pub fn unpack(&self) -> Value<'gc> {
         self.0.get()
+    }
+
+    pub fn unpack_fun(&self) -> Pointer<'gc> {
+        self.unpack().unwrap_app().fun
+    }
+
+    pub fn unpack_arg(&self) -> Pointer<'gc> {
+        self.unpack().unwrap_app().arg
     }
 }
 
 impl<'gc> From<Value<'gc>> for Node<'gc> {
     fn from(value: Value<'gc>) -> Self {
         Self(Lock::new(value))
+    }
+}
+
+impl<'gc> From<bool> for Value<'gc> {
+    fn from(value: bool) -> Self {
+        // Church-encoded booleans
+        if value {
+            Self::Combinator(Combinator::A)
+        } else {
+            Self::Combinator(Combinator::K)
+        }
+    }
+}
+
+impl<'gc> From<()> for Value<'gc> {
+    fn from(_: ()) -> Self {
+        // Church-encoded unit value
+        Self::Combinator(Combinator::I)
     }
 }
 
@@ -96,6 +122,21 @@ impl<'gc> Pointer<'gc> {
 
     pub fn set(&self, mc: &Mutation<'gc>, value: Value<'gc>) {
         self.ptr.unlock(mc).set(value)
+    }
+
+    pub fn follow(&self) -> Self {
+        let mut ptr = *self;
+        while let Value::Ref(p) = ptr.unpack() {
+            ptr = p;
+        }
+        ptr
+    }
+
+    pub fn forward(&mut self, _mc: &Mutation<'gc>) {
+        // TODO: forward all pointers to final destination
+        while let Value::Ref(p) = self.unpack() {
+            *self = p;
+        }
     }
 }
 
@@ -157,13 +198,13 @@ mod tests {
         // We need to create an arena here (despite no GC allocation) because of 'gc invariance.
         type Root = Rootable![Node<'_>];
 
-        let mut arena: Arena<Root> = Arena::new(|_m| Node::from(Value::Integer(42)));
-        arena.mutate(|_, v| assert_eq!(v.unpack(), Value::Integer(42)));
+        let mut arena: Arena<Root> = Arena::new(|_m| Node::from(Value::Integer(42.into())));
+        arena.mutate(|_, v| assert_eq!(v.unpack(), Value::Integer(42.into())));
 
         arena.mutate_root(|_, v| {
-            *v = Node::from(Value::Float(64.0));
+            *v = Node::from(Value::Float(64.0.into()));
         });
-        arena.mutate(|_, v| assert_eq!(v.unpack(), Value::Float(64.0)));
+        arena.mutate(|_, v| assert_eq!(v.unpack(), Value::Float(64.0.into())));
     }
 
     #[test]
@@ -185,13 +226,13 @@ mod tests {
         arena.mutate_root(|m, v| {
             let arg = Pointer::from(v[1]);
             let fun = Pointer::from(v[0]);
-            v.push(Gc::new(m, Node::from(Value::App { fun, arg })));
+            v.push(Gc::new(m, Node::from(Value::App(App { fun, arg }))));
         });
 
         arena.mutate(|_m, v| {
             let arg = Pointer::from(v[1]);
             let fun = Pointer::from(v[0]);
-            assert_eq!(v[2].unpack(), Value::App { fun, arg });
+            assert_eq!(v[2].unpack(), Value::App(App { fun, arg }));
         });
 
         arena.collect_all();
@@ -199,7 +240,7 @@ mod tests {
         arena.mutate(|_m, v| {
             let arg = Pointer::from(v[1]);
             let fun = Pointer::from(v[0]);
-            assert_eq!(v[2].unpack(), Value::App { fun, arg });
+            assert_eq!(v[2].unpack(), Value::App(App { fun, arg }));
         });
 
         arena.mutate_root(|_m, v| {
@@ -213,13 +254,7 @@ mod tests {
 
         arena.mutate(|_m, v| {
             let app = v[0].unpack();
-            if !matches!(
-                app,
-                Value::App {
-                    fun: _fun,
-                    arg: _arg
-                }
-            ) {
+            if !matches!(app, Value::App(_)) {
                 panic!("expected to unpack application, got: {:?}", v[0].unpack());
             }
         });

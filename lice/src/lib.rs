@@ -13,6 +13,12 @@ pub mod eval;
 #[cfg(feature = "rt")]
 pub mod string;
 
+#[cfg(feature = "rt")]
+pub mod integer;
+
+#[cfg(feature = "rt")]
+pub mod float;
+
 #[cfg(feature = "file")]
 pub mod file;
 

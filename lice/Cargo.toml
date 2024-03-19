@@ -11,17 +11,30 @@ default = [ "graph", "rt" ]
 std = [ "parse-display/std", "gc-arena/std" ]
 file = [ "std", "dep:nom" ]
 graph = [ "file", "dep:petgraph" ]
-rt = [ "dep:gc-arena", "dep:thin_str", "dep:zerocopy", "dep:zerocopy-derive" ]
+rt = [
+    "dep:gc-arena",
+    "dep:thin_str",
+    "dep:zerocopy",
+    "dep:zerocopy-derive",
+    "dep:heapless",
+    "dep:bitvec",
+    "dep:derive_more",
+]
 
 [dependencies]
 lice-macros = { path = "../lice-macros" }
-anyhow = { version = "1.0", default-features = false }
-log = { version = "0.4" }
-parse-display = { version = "0.9", default-features = false }
-nom = { version = "7.1", default-features = false, features = [ "alloc" ], optional = true }
-petgraph = { version = "0.6", optional = true }
-gc-arena = { version = "0.5", default-features = false, optional = true }
-num_enum = { version = "0.7" }
-thin_str = { version = "0.1", optional = true }
-zerocopy = { version = "0.7", optional = true }
-zerocopy-derive = { version = "0.7", optional = true }
+
+num_enum        = { version = "0.7" }
+parse-display   = { version = "0.9", default-features = false }
+log             = { version = "0.4" }
+anyhow          = { version = "1.0", default-features = false }
+
+nom             = { optional = true, version = "7.1", default-features = false, features = [ "alloc" ] }
+petgraph        = { optional = true, version = "0.6" }
+gc-arena        = { optional = true, version = "0.5", default-features = false }
+thin_str        = { optional = true, version = "0.1" }
+zerocopy        = { optional = true, version = "0.7" }
+zerocopy-derive = { optional = true, version = "0.7" }
+heapless        = { optional = true, version = "0.8" }
+bitvec          = { optional = true, version = "1" }
+derive_more     = { optional = true, version = "0.99" }
