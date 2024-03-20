@@ -4,6 +4,7 @@ members = [
     "lice",
     "lice-scope",
     "lice-macros",
+    "lice-run",
 ]
 
 [workspace.package]
