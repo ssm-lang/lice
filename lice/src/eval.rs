@@ -1,17 +1,18 @@
 #![allow(dead_code)]
-use core::{
-    cell::OnceCell,
-    fmt::{self, Display},
-};
-
 use crate::{
     combinator::{Combinator, Reduce, ReduxCode},
     float::Float,
     integer::Integer,
     memory::{App, Pointer, Value},
+    tick::TickTable,
 };
 use bitvec::prelude::*;
-use gc_arena::{Collect, Mutation, Rootable};
+use core::{
+    cell::OnceCell,
+    fmt::{self, Debug, Display},
+};
+use gc_arena::{Arena, Collect, Mutation, Rootable};
+use log::debug;
 
 /// A runtime error, probably due to a malformed graph.
 ///
@@ -149,17 +150,17 @@ struct State<'gc> {
     spine: Spine<'gc>,
     strict_context: Vec<Strict>,
     io_context: Vec<IO>,
+    tick_table: TickTable,
 }
 
-type Root = Rootable![State<'_>];
-
 impl<'gc> State<'gc> {
-    fn new(top: Pointer<'gc>) -> Self {
+    fn new(top: Pointer<'gc>, tick_table: TickTable) -> Self {
         Self {
             tip: top,
             spine: Default::default(),
             strict_context: Default::default(),
             io_context: Default::default(),
+            tick_table,
         }
     }
 
@@ -471,7 +472,9 @@ impl<'gc> State<'gc> {
         }
     }
 
-    fn eval_one(&mut self, mc: &Mutation<'gc>) {
+    fn step(&mut self, mc: &Mutation<'gc>) {
+        debug!("BEGIN step");
+
         let mut cur = self.tip;
         cur.forward(mc);
 
@@ -480,16 +483,20 @@ impl<'gc> State<'gc> {
                 unreachable!("indirections should already have been followed")
             }
             Value::App(App { fun, arg: _arg }) => {
+                debug!("encountered @ node");
                 self.spine.push(cur);
                 fun
             }
-            Value::Combinator(comb) => match self.start_strict(comb) {
-                // `next` has been reduced to a combinator, though one or more of its arguments
-                // still need to be evaluated before it can be handled
-                Some(next) => next,
-                // `next` has been reduced a combinator and is ready to be handled
-                None => self.handle_comb(comb, mc),
-            },
+            Value::Combinator(comb) => {
+                debug!("encountered combinator {comb}");
+                match self.start_strict(comb) {
+                    // `next` has been reduced to a combinator, though one or more of its arguments
+                    // still need to be evaluated before it can be handled
+                    Some(next) => next,
+                    // `next` has been reduced a combinator and is ready to be handled
+                    None => self.handle_comb(comb, mc),
+                }
+            }
             Value::String(_) | Value::Integer(_) | Value::Float(_) => {
                 // `next` has been reduced to a value, so we need to check the continuation
                 // context to see what to do next
@@ -500,6 +507,51 @@ impl<'gc> State<'gc> {
                     Err(comb) => self.handle_comb(comb, mc),
                 }
             }
+            Value::Tick(t) => {
+                self.tick_table.tick(t);
+                let Some(next) = self.spine.pop() else {
+                    runtime_crash!(
+                        "Could not pop arg while evaluating tick {}",
+                        self.tick_table.info(t).name
+                    )
+                };
+                next
+            }
+            v @ Value::Ffi(_) => {
+                panic!("don't know how to handle {v:?} yet")
+            }
+        };
+
+        debug!("END step");
+    }
+}
+
+pub struct VM {
+    arena: Arena<Rootable![State<'_>]>,
+}
+
+impl VM {
+    pub fn step(&mut self) {
+        self.arena.mutate_root(|mc, st| st.step(mc));
+    }
+}
+
+impl Debug for VM {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: provide stats here?
+        f.debug_struct("VM").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "file")]
+impl From<crate::file::Program> for VM {
+    fn from(value: crate::file::Program) -> Self {
+        Self {
+            arena: Arena::new(|mc| {
+                let mut tbl = TickTable::new();
+                let top = value.deserialize(mc, &mut tbl);
+                State::new(top, tbl)
+            }),
         }
     }
 }
@@ -554,11 +606,11 @@ mod tests {
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let top = app!(mc, :Mul, #42, #10);
-            (State::new(top), top)
+            (State::new(top, Default::default()), top)
         }); // tip points to ((* 42) 10)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to (* 42)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to *
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // reduce *, tip points to result (420)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (* 42)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to *
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce *, tip points to result (420)
         arena.mutate(|_, (st, top)| {
             assert_eq!(st.tip, *top, "tip is back at top");
             assert_eq!(
@@ -580,15 +632,15 @@ mod tests {
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let (s, k, r) = (comb!(mc, S), comb!(mc, K), comb!(mc, R));
             let top = app!(mc, s, k, k, r);
-            (State::new(top), top)
+            (State::new(top, Default::default()), top)
         }); // tip points to (((S K) K) R)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to ((S K) K)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to (S K)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to S
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // reduce S, tip points to ((K R) (K R))
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to (K R)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to K
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // reduce K, tip points to *->R
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to ((S K) K)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (S K)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to S
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce S, tip points to ((K R) (K R))
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (K R)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to K
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce K, tip points to *->R
 
         arena.mutate(|_, (st, top)| {
             assert_eq!(
@@ -613,17 +665,17 @@ mod tests {
             let result = int!(mc, 42);
             let inner = app!(mc, :Then, @(:Return, bottom), @(:Return, result));
             let top = app!(mc, :Bind, inner, :Return);
-            (State::new(top), result)
+            (State::new(top, Default::default()), result)
         });
         // tip points to ((>>= ((>> (return_0 bottom)) (return_1 result))) return_2)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to (>>= ((>> (return_0 bottom)) (return_1 result)))
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to >>=
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // reduce >>=, tip points to ((>> (return_0 bottom)) (return_1 result))
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to (>> (return_0 bottom))
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to >>
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // reduces >>, tip points to (return_1 result)
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // tip points to return_1
-        arena.mutate_root(|mc, (st, _)| st.eval_one(mc)); // reduce return_1, tip points to (return_2 result)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (>>= ((>> (return_0 bottom)) (return_1 result)))
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to >>=
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce >>=, tip points to ((>> (return_0 bottom)) (return_1 result))
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (>> (return_0 bottom))
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to >>
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduces >>, tip points to (return_1 result)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to return_1
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce return_1, tip points to (return_2 result)
 
         arena.mutate(|_, (st, result)| {
             let tip = st.tip;

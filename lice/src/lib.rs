@@ -19,6 +19,12 @@ pub mod integer;
 #[cfg(feature = "rt")]
 pub mod float;
 
+#[cfg(feature = "rt")]
+pub mod ffi;
+
+#[cfg(feature = "rt")]
+pub mod tick;
+
 #[cfg(feature = "file")]
 pub mod file;
 

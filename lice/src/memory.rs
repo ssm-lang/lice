@@ -1,8 +1,11 @@
 //! Runtime memory layout for combinator graph reducer.
 
+use crate::ffi::Ffi;
 use crate::float::Float;
 use crate::string::GcString;
+use crate::tick::{Tick, TickTable};
 use crate::{combinator::Combinator, integer::Integer};
+use core::fmt::Debug;
 use core::{cell::Cell, ops};
 use derive_more::{From, TryInto, Unwrap};
 use gc_arena::{barrier::Unlock, lock::Lock, static_collect, Collect, Gc, Mutation};
@@ -28,11 +31,20 @@ impl<'gc> Unlock for Node<'gc> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Collect, PartialEq)]
+#[derive(Clone, Copy, Collect, PartialEq)]
 #[collect(no_drop)]
 pub struct App<'gc> {
     pub fun: Pointer<'gc>,
     pub arg: Pointer<'gc>,
+}
+
+impl<'gc> Debug for App<'gc> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("App")
+            .field("fun", &Gc::as_ptr(self.fun.ptr))
+            .field("arg", &Gc::as_ptr(self.fun.ptr))
+            .finish()
+    }
 }
 
 /// Inner contents of a node.
@@ -45,6 +57,8 @@ pub enum Value<'gc> {
     String(GcString<'gc>),
     Integer(Integer),
     Float(Float),
+    Ffi(Ffi),
+    Tick(Tick),
 }
 
 // Combinators are just constant values.
@@ -109,10 +123,19 @@ impl<'gc> From<()> for Value<'gc> {
 /// Currently, this is just a wrapper around [`Gc`] pointers, but this may eventually encapsulate
 /// several different types of internal pointers, e.g., unique [`Box`]es or `&'static` references.
 /// Those pointers will have their lowest bits tagged by the values enumerated in [`Stolen`].
-#[derive(Debug, Collect, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct Pointer<'gc> {
     ptr: Gc<'gc, Node<'gc>>,
+}
+
+impl<'gc> Debug for Pointer<'gc> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Pointer")
+            .field(&Gc::as_ptr(self.ptr))
+            .field(self.ptr.as_ref())
+            .finish()
+    }
 }
 
 impl<'gc> Pointer<'gc> {
@@ -156,9 +179,47 @@ impl<'gc> ops::Deref for Pointer<'gc> {
 }
 
 impl<'gc> From<Gc<'gc, Node<'gc>>> for Pointer<'gc> {
-    #[inline(always)]
     fn from(value: Gc<'gc, Node<'gc>>) -> Self {
         Self { ptr: value }
+    }
+}
+
+#[cfg(feature = "file")]
+impl crate::file::Program {
+    pub fn deserialize<'gc>(&self, mc: &Mutation<'gc>, tick_table: &mut TickTable) -> Pointer<'gc> {
+        // Algorithm: a two-pass scan through the program body
+        use crate::file::Expr;
+
+        // First, allocate placeholder memory locations for each node
+        let heap: Vec<_> = self
+            .body
+            .iter()
+            .map(|_| Pointer::new(mc, Value::Combinator(Combinator::Y)))
+            .collect();
+
+        // Then, modify each node in-place, according to the
+        for (i, expr) in self.body.iter().enumerate() {
+            heap[i].set(
+                mc,
+                match expr {
+                    Expr::App(f, a) => Value::App(App {
+                        fun: heap[*f],
+                        arg: heap[*a],
+                    }),
+                    Expr::Ref(r) => Value::Ref(heap[self.defs[*r]]),
+                    Expr::Prim(c) => Value::Combinator(*c),
+                    Expr::Float(f) => Value::Float(Float::from(*f)),
+                    Expr::Int(i) => Value::Integer(Integer::from(*i)),
+                    Expr::String(s) => Value::String(GcString::new(mc, s)),
+                    Expr::Tick(name) => Value::Tick(tick_table.add_entry(name)),
+                    Expr::Ffi(name) => Value::Ffi(Ffi::new(name)),
+                    Expr::Array(_, _) => todo!("arrays"),
+                    Expr::Unknown(s) => panic!("unable to deserialize {s}"),
+                },
+            )
+        }
+
+        heap[self.root]
     }
 }
 

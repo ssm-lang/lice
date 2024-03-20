@@ -616,11 +616,7 @@ mod tests {
         // Cycle with ref
         let p = Program {
             root: 0,
-            body: vec![
-                Expr::App(1, 2),
-                Expr::Ref(0),
-                Expr::Prim(Combinator::I),
-            ],
+            body: vec![Expr::App(1, 2), Expr::Ref(0), Expr::Prim(Combinator::I)],
             defs: vec![0],
         };
         assert_eq!(p.to_string(), "_0 I @ :0 }");
