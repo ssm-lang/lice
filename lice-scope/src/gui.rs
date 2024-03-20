@@ -83,7 +83,10 @@ fn build_meta(
 pub fn to_gui_graph(p: &Program) -> GuiGraph {
     let metadata = build_metadata(p);
     let mut g = CombGraph::from(p);
+    g.forward_indirections();
+    g.mark_redexes();
 
+    /*
     // Begin: an ad hoc set of transformations that should probably be done interactively/elsewhere
     println!("Before: {} nodes", g.g.node_count());
     g.forward_indirections();
@@ -95,6 +98,7 @@ pub fn to_gui_graph(p: &Program) -> GuiGraph {
     g.mark_redexes();
     println!("After: {} nodes", g.g.node_count());
     // End: an ad hoc set of transformations that should probably be done interactively/elsewhere
+    */
 
     GuiGraph {
         root: g.root,
