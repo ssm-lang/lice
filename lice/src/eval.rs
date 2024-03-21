@@ -164,33 +164,47 @@ impl<'gc> State<'gc> {
         }
     }
 
+    /// Symbolic handler for combinators with well-defined "redux code".
+    ///
+    /// With luck, the `rustc` optimizer will unroll this stack machine interpreter into efficient
+    /// code, such that the `args` are kept in registers, and the `stk` is completely gone.
+    #[inline(always)]
     fn do_redux(&mut self, mc: &Mutation<'gc>, comb: Combinator) -> Pointer<'gc> {
-        let arity = comb.arity();
-        let code = comb
-            .redux()
-            .unwrap_or_else(|| panic!("{comb} does not have redux code"));
+        #[cfg(debug_assertions)]
+        macro_rules! unwrap {
+            ($e:expr) => {
+                ($e).unwrap()
+            };
+        }
+        #[cfg(not(debug_assertions))]
+        macro_rules! unwrap {
+            ($e:expr) => {
+                unsafe { ($e).unwrap_unchecked() }
+            };
+        }
+
+        let code = unwrap!(comb.redux());
 
         let mut top = self.tip;
-        let mut args = Vec::new();
-        for i in 0..arity {
+        let mut args = heapless::Vec::<_, 4>::new();
+        let mut stk = heapless::Vec::<_, 8>::new();
+
+        for i in 0..comb.arity() {
             let Some(app) = self.spine.pop() else {
                 runtime_crash!("Could not pop arg {i} for combinator {comb}")
             };
-            args.push(app.unpack_arg());
+            unwrap!(args.push(app.unpack_arg()));
             top = app;
         }
 
-        let mut stk = heapless::Vec::<_, 8>::new();
-
         for b in &code[..code.len() - 1] {
             match b {
-                ReduxCode::Arg(i) => stk.push(args[*i]).unwrap(),
-                ReduxCode::Top => stk.push(top).unwrap(),
+                ReduxCode::Arg(i) => unwrap!(stk.push(args[*i])),
+                ReduxCode::Top => unwrap!(stk.push(top)),
                 ReduxCode::App => {
-                    let arg = stk.pop().unwrap();
-                    let fun = stk.pop().unwrap();
-                    stk.push(Pointer::new(mc, Value::App(App { fun, arg })))
-                        .unwrap()
+                    let arg = unwrap!(stk.pop());
+                    let fun = unwrap!(stk.pop());
+                    unwrap!(stk.push(Pointer::new(mc, Value::App(App { fun, arg }))))
                 }
             }
         }
@@ -205,8 +219,8 @@ impl<'gc> State<'gc> {
                 unreachable!("no rule should reduce to '^' alone ")
             }
             ReduxCode::App => {
-                let arg = stk.pop().unwrap();
-                let fun = stk.pop().unwrap();
+                let arg = unwrap!(stk.pop());
+                let fun = unwrap!(stk.pop());
                 top.set(mc, Value::App(App { fun, arg }));
                 top
             }
