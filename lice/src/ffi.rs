@@ -1,11 +1,13 @@
-use gc_arena::Collect;
+use gc_arena::{Collect, Mutation};
+
+use crate::string::VString;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Collect)]
-#[collect(require_static)]
-pub struct Ffi();
+#[collect(no_drop)]
+pub struct Ffi<'gc>(VString<'gc>);
 
-impl Ffi {
-    pub fn new(_name: &str) -> Self {
-        Self()
+impl<'gc> Ffi<'gc> {
+    pub fn new(mc: &Mutation<'gc>, name: &str) -> Self {
+        Self(VString::new(mc, name))
     }
 }

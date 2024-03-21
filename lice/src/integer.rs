@@ -123,4 +123,5 @@ impl_from!(i8 as usize);
 impl_from!(i16 as usize);
 impl_from!(i32 as usize);
 impl_from!(i64 as usize);
+impl_from!(char as usize);
 impl_from!(|value: bool| if value { 1 } else { 0 });

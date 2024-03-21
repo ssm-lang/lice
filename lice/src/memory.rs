@@ -2,7 +2,7 @@
 
 use crate::ffi::Ffi;
 use crate::float::Float;
-use crate::string::GcString;
+use crate::string::VString;
 use crate::tick::{Tick, TickTable};
 use crate::{combinator::Combinator, integer::Integer};
 use core::fmt::Debug;
@@ -54,10 +54,10 @@ pub enum Value<'gc> {
     App(App<'gc>),
     Ref(Pointer<'gc>),
     Combinator(Combinator),
-    String(GcString<'gc>),
+    String(VString<'gc>),
     Integer(Integer),
     Float(Float),
-    Ffi(Ffi),
+    Ffi(Ffi<'gc>),
     Tick(Tick),
 }
 
@@ -210,9 +210,9 @@ impl crate::file::Program {
                     Expr::Prim(c) => Value::Combinator(*c),
                     Expr::Float(f) => Value::Float(Float::from(*f)),
                     Expr::Int(i) => Value::Integer(Integer::from(*i)),
-                    Expr::String(s) => Value::String(GcString::new(mc, s)),
+                    Expr::String(s) => Value::String(VString::new(mc, s)),
                     Expr::Tick(name) => Value::Tick(tick_table.add_entry(name)),
-                    Expr::Ffi(name) => Value::Ffi(Ffi::new(name)),
+                    Expr::Ffi(name) => Value::Ffi(Ffi::new(mc, name)),
                     Expr::Array(_, _) => todo!("arrays"),
                     Expr::Unknown(s) => panic!("unable to deserialize {s}"),
                 },
@@ -247,10 +247,9 @@ mod tests {
         // Create and initialize from a stack string to ensure we're comparing by value.
         let hello = "hello".to_string();
 
-        let arena: Arena<Root> =
-            Arena::new(|m| Node::from(Value::String(GcString::new(m, &hello))));
+        let arena: Arena<Root> = Arena::new(|m| Node::from(Value::String(VString::new(m, &hello))));
         arena.mutate(|m, s| {
-            assert_eq!(s.unpack(), Value::String(GcString::new(m, "hello")));
+            assert_eq!(s.unpack(), Value::String(VString::new(m, "hello")));
         });
     }
 
@@ -280,7 +279,7 @@ mod tests {
         arena.mutate_root(|m, v| {
             v.push(Gc::new(
                 m,
-                Node::from(Value::String(GcString::new(m, "hello"))),
+                Node::from(Value::String(VString::new(m, "hello"))),
             ));
         });
 

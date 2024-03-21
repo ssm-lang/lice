@@ -469,6 +469,22 @@ pub enum Combinator {
     CStringPeekLen,
 }
 
+/// The runtime needs to know how core data structures are encoded: booleans, pairs, and lists.
+impl Combinator {
+    /// Scott-encoded `True`.
+    pub const TRUE: Self = Self::A;
+    /// Scott-encoded `False`.
+    pub const FALSE: Self = Self::K;
+
+    /// Scott-encoded pair `(,)`
+    pub const PAIR: Self = Self::P;
+
+    /// Scott-encoded list cons `(:)`.
+    pub const CONS: Self = Self::O;
+    /// Scott-encoded list nil `[]`.
+    pub const NIL: Self = Self::FALSE;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

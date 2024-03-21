@@ -314,6 +314,46 @@ impl<'gc> State<'gc> {
         }
     }
 
+    fn handle_from_utf8(&mut self, mc: &Mutation<'gc>) -> Pointer<'gc> {
+        let c = Combinator::FromUtf8;
+        let Some(top) = self.spine.pop() else {
+            runtime_crash!("Could not pop arg 0 while performing {c}",)
+        };
+        let arg = top.unpack_arg();
+        let Value::String(arg) = arg.unpack() else {
+            runtime_crash!("{c} expected arg to be string, instead got {arg:?}",)
+        };
+
+        let arg: &str = arg.as_ref();
+
+        // TODO: don't allocate new combinators
+        let mut res = Pointer::new(mc, Value::Combinator(Combinator::NIL));
+        if arg.is_empty() {
+            return res;
+        }
+        let cons = Pointer::new(mc, Value::Combinator(Combinator::CONS));
+
+        for c in arg.chars().rev() {
+            let data = Pointer::new(mc, Value::Integer(Integer::from(c)));
+            let data = Pointer::new(
+                mc,
+                Value::App(App {
+                    fun: cons,
+                    arg: data,
+                }),
+            );
+            res = Pointer::new(
+                mc,
+                Value::App(App {
+                    fun: data,
+                    arg: res,
+                }),
+            );
+        }
+
+        res
+    }
+
     fn handle_unop<Q, R>(
         &mut self,
         mc: &Mutation<'gc>,
@@ -479,7 +519,7 @@ impl<'gc> State<'gc> {
             Combinator::ArrWrite => todo!(),
             Combinator::ArrEq => todo!(),
 
-            Combinator::FromUtf8 => todo!(),
+            Combinator::FromUtf8 => self.handle_from_utf8(mc),
             Combinator::CStringNew => todo!(),
             Combinator::CStringPeek => todo!(),
             Combinator::CStringPeekLen => todo!(),
