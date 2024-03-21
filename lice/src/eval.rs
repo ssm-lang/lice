@@ -478,17 +478,16 @@ impl<'gc> State<'gc> {
         let mut cur = self.tip;
         cur.forward(mc);
 
+        debug!("handling node: {cur:?}");
         self.tip = match cur.unpack() {
             Value::Ref(_) => {
                 unreachable!("indirections should already have been followed")
             }
             Value::App(App { fun, arg: _arg }) => {
-                debug!("encountered @ node");
                 self.spine.push(cur);
                 fun
             }
             Value::Combinator(comb) => {
-                debug!("encountered combinator {comb}");
                 match self.start_strict(comb) {
                     // `next` has been reduced to a combinator, though one or more of its arguments
                     // still need to be evaluated before it can be handled
@@ -515,7 +514,7 @@ impl<'gc> State<'gc> {
                         self.tick_table.info(t).name
                     )
                 };
-                next
+                next.unpack_arg()
             }
             v @ Value::Ffi(_) => {
                 panic!("don't know how to handle {v:?} yet")
