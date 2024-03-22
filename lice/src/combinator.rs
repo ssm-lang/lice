@@ -471,6 +471,9 @@ pub enum Combinator {
 
 /// The runtime needs to know how core data structures are encoded: booleans, pairs, and lists.
 impl Combinator {
+    /// Scott-encoded unit `()`.
+    pub const UNIT: Self = Self::I;
+
     /// Scott-encoded `True`.
     pub const TRUE: Self = Self::A;
     /// Scott-encoded `False`.
