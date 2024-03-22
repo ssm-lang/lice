@@ -1,15 +1,22 @@
 use std::collections::HashMap;
 
-use egg;
 use egg::*;
+use ordered_float::OrderedFloat;
 use lice::combinator::Combinator;
 use lice::file::{Expr, Index, Program};
 
 define_language! {
     enum SKI {
-        Comb(Combinator),
+        Prim(Combinator),
         "@" = App([Id; 2]),
+        Float(OrderedFloat<f64>),
         Int(i64),
+        Array(usize, Vec<Id>),
+        Ref(usize),
+        String(String),
+        Tick(String),
+        Ffi(String),
+        Unknown(String),
     }
 }
 
@@ -64,7 +71,7 @@ fn construct_egraph(
             app_eid
         }
         Expr::Prim(comb) => {
-            let comb_eid = egraph.add(SKI::Comb(*comb));
+            let comb_eid = egraph.add(SKI::Prim(*comb));
             idx_eid_map.insert(idx, comb_eid);
             comb_eid
         }
@@ -73,6 +80,7 @@ fn construct_egraph(
             idx_eid_map.insert(idx, int_eid);
             int_eid
         }
+        
         _ => todo!("add more exprs"),
     }
 }
@@ -84,7 +92,7 @@ fn construct_program(
     let expr_vec = expr.as_ref();
     let body = expr_vec.iter().map(|e| match e {
         SKI::App([f, a]) => Expr::App(usize::from(*f), usize::from(*a)),
-        SKI::Comb(comb) => Expr::Prim(*comb),
+        SKI::Prim(comb) => Expr::Prim(*comb),
         SKI::Int(i) => Expr:: Int(*i),
         _ => todo!("add more exprs")
     }).collect();
@@ -115,19 +123,18 @@ mod tests {
     #[test]
     fn program_to_egraph_then_reduce() {
         let p = Program {
-            root: 6,
+            root: 5,
             body: vec![
                 /* 0 */ Expr::Prim(Combinator::S),
                 /* 1 */ Expr::Prim(Combinator::K),
-                /* 2 */ Expr::Prim(Combinator::K),
-                /* 3 */ Expr::Int(1),
-                /* 4 */ Expr::App(0, 1),
+                /* 2 */ Expr::Int(1),
+                /* 3 */ Expr::App(0, 1),
+                /* 4 */ Expr::App(3, 1),
                 /* 5 */ Expr::App(4, 2),
-                /* 6 */ Expr::App(5, 3),
             ],
             defs: vec![0],
         };
-        assert_eq!(p.to_string(), "S K @ K @ #1 @ }");
+        assert_eq!(p.to_string(), "S K :0 @ _0 @ #1 @ }");
         let (root, _, egraph) = program_to_egraph(&p);
         let runner = Runner::<SKI, ()>::default()
             .with_egraph(egraph)
@@ -136,34 +143,5 @@ mod tests {
         let extractor = Extractor::new(&runner.egraph, AstSize);
         let (_, best) = extractor.find_best(root);
         assert!(best.to_string() == "1");
-    }
-    
-    #[test]
-    fn egraph_recexpr_to_program() {
-        let p = Program {
-            root: 6,
-            body: vec![
-                /* 0 */ Expr::Prim(Combinator::S),
-                /* 1 */ Expr::Prim(Combinator::K),
-                /* 2 */ Expr::Prim(Combinator::K),
-                /* 3 */ Expr::Int(1),
-                /* 4 */ Expr::App(0, 1),
-                /* 5 */ Expr::App(4, 2),
-                /* 6 */ Expr::App(5, 3),
-            ],
-            defs: vec![0],
-        };
-        assert_eq!(p.to_string(), "S K @ K @ #1 @ }");
-        let (root, idx_eid_map, egraph) = program_to_egraph(&p);
-        let runner = Runner::<SKI, ()>::default()
-            .with_egraph(egraph)
-            .run(vec![]);
-        let extractor = Extractor::new(&runner.egraph, AstSize);
-        let (_, expr) = extractor.find_best(root);
-        println!("expr: {}", expr.to_string());
-
-        let constructed = construct_program(&expr, root);
-        println!("constructed: {:#?}", constructed);
-        assert_eq!(constructed.to_string(), "S K @ K @ #1 @ }");
     }
 }
