@@ -1,0 +1,5 @@
+[formatting]
+align_entries         = true
+align_single_comments = true
+allowed_blank_lines   = 1
+array_auto_collapse   = false

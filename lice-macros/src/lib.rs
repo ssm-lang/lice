@@ -1,21 +1,34 @@
 use darling::{ast, util::SpannedValue, Error, FromDeriveInput, FromMeta, FromVariant};
 use nom::{
     branch::alt,
-    bytes::complete::tag,
-    character::complete::{alphanumeric1, char, multispace0, multispace1},
-    combinator::cut,
+    bytes::complete::{tag, take_while1},
+    character::{
+        complete::{char, multispace0, multispace1},
+        is_alphanumeric,
+    },
+    combinator::{cut, eof, opt},
     multi::{many1, separated_list1},
-    sequence::delimited,
+    sequence::{delimited, pair, terminated},
     Finish, IResult, Parser,
 };
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
+fn identifier(i: &str) -> IResult<&str, &str> {
+    take_while1(|c: char| is_alphanumeric(c as u8) || c == '_' || c == '\'')(i)
+}
+
+#[derive(Debug, Clone)]
+struct Arg {
+    name: String,
+    strict: bool,
+}
+
 /// Redex (LHS) of a reduction rule, i.e., a list of the names of the args.
 #[derive(Debug, Clone)]
 struct Redex {
-    args: Vec<String>,
+    args: Vec<Arg>,
 }
 
 /// Reduct (RHS) of a reduction rule, an AST.
@@ -25,37 +38,52 @@ enum Reduct {
     App(Box<Self>, Box<Self>),
     /// Var, e.g., `x`.
     Var(String),
-    /// Reference to the top-level node of the redex, parsed from `self`.
+    /// Reference to the top-level app node of the redex, parsed from `^`.
     ///
-    /// Basically only useful for the `Y` combinator, whose rule is `x => x self`.
-    SelfRef,
+    /// Basically only useful for the `Y` combinator, whose rule is `x => x ^`.
+    Top,
 }
 
 impl Redex {
     /// Parse arguments from string using `nom`.
     fn nom_str(i: &str) -> IResult<&str, Self> {
-        let p = separated_list1(multispace1, alphanumeric1.map(|s: &str| s.to_string()))
-            .map(|args| Self { args });
-        delimited(multispace0, p, multispace0)(i)
+        let arg = pair(opt(char('!')), identifier);
+        let args = separated_list1(
+            multispace1,
+            arg.map(|(bang, name): (Option<_>, &str)| Arg {
+                name: name.to_string(),
+                strict: bang.is_some(),
+            }),
+        )
+        .map(|args| Self { args });
+        delimited(multispace0, args, multispace0)(i)
     }
 
     /// Check for duplicate arguments.
     fn check(&self) -> darling::Result<()> {
         for (i, a) in self.args.iter().enumerate() {
             for j in 0..i {
-                if a == &self.args[j] {
-                    return Err(darling::Error::custom(format!("duplicate argument: {a}")));
+                if a.name == self.args[j].name {
+                    return Err(darling::Error::custom(format!(
+                        "duplicate argument: {}",
+                        a.name
+                    )));
                 }
             }
         }
         Ok(())
     }
+
+    /// Find the 0-based index of a given variable name
+    fn index_of(&self, name: &str) -> Option<usize> {
+        self.args.iter().position(|arg| arg.name == name)
+    }
 }
 
 impl FromMeta for Redex {
     fn from_string(value: &str) -> darling::Result<Self> {
-        Self::nom_str(value)
-            // .finish()
+        terminated(Self::nom_str, eof)(value)
+            .finish()
             .map(|(_, v)| v)
             .map_err(darling::Error::custom)
     }
@@ -66,8 +94,8 @@ impl Reduct {
     fn nom_str(i: &str) -> IResult<&str, Self> {
         let atom = alt((
             delimited(char('('), cut(Self::nom_str), cut(char(')'))),
-            tag("self").map(|_| Self::SelfRef),
-            alphanumeric1.map(|s: &str| Self::Var(s.to_owned())),
+            tag("^").map(|_| Self::Top),
+            identifier.map(|s: &str| Self::Var(s.to_owned())),
         ));
         let atom = delimited(multispace0, atom, multispace0);
 
@@ -84,22 +112,34 @@ impl Reduct {
 
     /// Check for undefined variables (i.e., not present in arguments).
     fn check(&self, redex: &Redex) -> darling::Result<()> {
-        match self {
+        let _ = self.compile(redex)?;
+        Ok(())
+    }
+
+    /// Compile redux to symbolic bytecode representation, in bytecode.
+    fn compile(&self, redex: &Redex) -> darling::Result<Vec<TokenStream>> {
+        Ok(match self {
             Reduct::App(f, a) => {
-                f.check(redex)?;
-                a.check(redex)
+                let f = f.compile(redex)?;
+                let a = a.compile(redex)?;
+                [f, a, vec![quote!(ReduxCode::App)]].concat()
             }
-            Reduct::Var(a) if !redex.args.contains(a) => {
-                Err(darling::Error::custom(format!("undefined variable: {a}")))
+            Reduct::Var(a) => {
+                let Some(i) = redex.index_of(a) else {
+                    return Err(darling::Error::custom(format!("undefined variable: {a}")));
+                };
+                vec![quote!(ReduxCode::Arg(#i))]
             }
-            _ => Ok(()),
-        }
+            Reduct::Top => {
+                vec![quote!(ReduxCode::Top)]
+            }
+        })
     }
 }
 
 impl FromMeta for Reduct {
     fn from_string(value: &str) -> darling::Result<Self> {
-        Self::nom_str(value)
+        terminated(Self::nom_str, eof)(value)
             .finish()
             .map(|(_, v)| v)
             .map_err(darling::Error::custom)
@@ -113,6 +153,38 @@ struct ReduceVariant {
     ident: Ident,
     from: Option<SpannedValue<Redex>>,
     to: Option<SpannedValue<Reduct>>,
+    constant: Option<SpannedValue<()>>,
+}
+
+impl ReduceVariant {
+    fn arity(&self) -> darling::Result<usize> {
+        match (&self.from, self.constant) {
+            (None, Some(_)) => Ok(0),
+            (Some(from), None) => Ok(from.args.len()),
+            (Some(_), Some(_)) => Err(darling::Error::custom(
+                "redex ('from') specified for 'constant' (where arity = 0)",
+            )
+            .with_span(&self.ident.span())),
+            (None, None) => Err(darling::Error::custom("no redex ('from') specified!")
+                .with_span(&self.ident.span())),
+        }
+    }
+
+    fn check(&self) -> darling::Result<()> {
+        if let Some(from) = &self.from {
+            from.check().map_err(|e| e.with_span(&from.span()))?;
+            if let Some(to) = &self.to {
+                to.check(from).map_err(|e| e.with_span(&to.span()))?;
+            }
+        } else if let Some(to) = &self.to {
+            return Err(
+                darling::Error::custom("'to' defined without 'from'".to_string())
+                    .with_span(&to.span()),
+            );
+        }
+        let _ = self.arity()?; // check that arity returns Ok()
+        Ok(())
+    }
 }
 
 /// Reduce `enum` definition.
@@ -135,38 +207,45 @@ impl ReduceEnum {
 
         // First do sanity-checks (and accumulate potential errors)
         for v in variants {
-            if let Some(from) = &v.from {
-                errors.handle(from.check().map_err(|e| e.with_span(&from.span())));
-                if let Some(to) = &v.to {
-                    errors.handle(to.check(from).map_err(|e| e.with_span(&to.span())));
-                }
-            } else if let Some(to) = &v.to {
-                errors.push(
-                    darling::Error::custom("'to' defined without 'from'".to_string())
-                        .with_span(&to.span()),
-                )
-            }
+            errors.handle(v.check());
         }
 
         // No more errors possible from here on out
         errors.finish()?;
 
-        // Generate `fn arity()` implementation
-        let arities = variants.iter().map(|v| {
+        let reduxes = variants.iter().map(|v| {
             let variant = &v.ident;
-            if let Some(from) = &v.from {
-                let arity = from.args.len();
-                quote!(#ident::#variant => Some(#arity))
+            if let Some(to) = &v.to {
+                let code = to.compile(v.from.as_ref().unwrap()).unwrap();
+                quote!(#ident::#variant => Some(&[#(#code),*]))
             } else {
                 quote!(#ident::#variant => None)
             }
         });
 
+        let strictness = variants.iter().map(|v| {
+            let variant = &v.ident;
+            if let Some(from) = &v.from {
+                let strict = from.args.iter().map(|arg| arg.strict);
+                quote!(#ident::#variant => &[#(#strict),*])
+            } else {
+                quote!(#ident::#variant => &[])
+            }
+        });
+
         Ok(quote! {
             impl crate::combinator::Reduce for #ident {
-                fn arity(&self) -> Option<usize> {
+                #[inline]
+                fn strictness(&self) -> &'static [bool] {
                     match self {
-                        #(#arities),*
+                        #(#strictness),*
+                    }
+                }
+
+                #[inline]
+                fn redux(&self) -> Option<&'static [crate::combinator::ReduxCode]> {
+                    match self {
+                        #(#reduxes),*
                     }
                 }
             }
