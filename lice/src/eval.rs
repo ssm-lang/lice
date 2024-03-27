@@ -13,7 +13,7 @@ use core::{
     fmt::{self, Debug, Display},
 };
 use gc_arena::{Arena, Collect, Mutation, Rootable};
-use log::debug;
+use log::{debug, info};
 
 /// A runtime error, probably due to a malformed graph.
 ///
@@ -93,11 +93,12 @@ impl StrictWork {
         // Also find index of first argument that needs evaluating
         let first = OnceCell::new();
 
-        for (idx, &strict) in strict.strictness().iter().enumerate() {
+        for (idx, is_strict) in strict.strictness().iter().enumerate() {
             let Some(app) = spine.peek(idx) else {
-                runtime_crash!("Arg {idx} not present for {strict:?}")
+                runtime_crash!("Arg {idx} not present for {is_strict:?}")
             };
-            if strict && !app.unpack_arg().unpack().whnf() {
+            let app = app.follow();
+            if *is_strict && !app.unpack_arg().follow().unpack().whnf() {
                 // Remember the first argument that needs evaluating:
                 let is_pending = first.set(idx).is_err();
                 if is_pending {
@@ -110,7 +111,7 @@ impl StrictWork {
         let first = *first.get()?; // If no args need to be evaluated, then return None
         Some((
             Self { strict, args },
-            spine.peek(first).unwrap().unpack_arg(),
+            spine.peek(first).unwrap().follow().unpack_arg().follow(),
         ))
     }
 
@@ -118,6 +119,7 @@ impl StrictWork {
     fn advance<'gc>(&mut self, spine: &Spine<'gc>) -> Option<Pointer<'gc>> {
         // No need to iterate over index 0 because it should never have been set.
         for idx in 1..Self::MAX_ARGS {
+            debug!("advance {:?}: checking arg {idx}", self.strict);
             if self.args[idx] {
                 self.args.set(idx, false);
 
@@ -127,9 +129,16 @@ impl StrictWork {
                         self.strict
                     )
                 };
-                if !app.unpack_arg().unpack().whnf() {
+                debug!(
+                    "advance {:?}: checking arg: {:?}",
+                    self.strict,
+                    app.unpack_arg()
+                );
+                let app = app.follow();
+                let arg = app.unpack_arg().follow();
+                if !arg.unpack().whnf() {
                     // Only evaluate this arg next if it is not in WHNF yet
-                    return Some(app);
+                    return Some(app.unpack_arg().follow());
                 }
             }
         }
@@ -251,20 +260,28 @@ impl<'gc> State<'gc> {
     }
 
     fn start_strict(&mut self, strict: Strict) -> Option<Pointer<'gc>> {
-        let (strict, first) = StrictWork::init(strict, &self.spine)?;
-        self.strict_context.push(strict);
+        let (work, first) = StrictWork::init(strict, &self.spine)?;
+        self.strict_context.push(work);
         Some(first)
     }
 
     fn resume_strict(&mut self) -> Result<Pointer<'gc>, Strict> {
-        let Some(strict) = self.strict_context.last_mut() else {
+        let Some(work) = self.strict_context.last_mut() else {
             runtime_crash!("No pending strict operation");
         };
 
-        if let Some(next) = strict.advance(&self.spine) {
+        if let Some(next) = work.advance(&self.spine) {
+            debug!(
+                "Resuming evaluation of strict {:?}, advanced to next argument",
+                work.strict
+            );
             Ok(next)
         } else {
-            let comb = strict.strict;
+            debug!(
+                "Resuming evaluation of strict {:?}, all arguments in WHNF",
+                work.strict
+            );
+            let comb = work.strict;
             self.strict_context.pop();
             Err(comb)
         }
@@ -301,7 +318,10 @@ impl<'gc> State<'gc> {
                 let continuation = app.unpack_arg();
                 self.spine.push(continuation);
             }
-            IO::Perform => (),
+            IO::Perform => {
+                // Push the app node back onto the spine. We will overwrite it later.
+                self.spine.push(app);
+            }
         }
 
         self.io_context.push(io);
@@ -310,30 +330,31 @@ impl<'gc> State<'gc> {
 
     fn resume_io(&mut self, mc: &Mutation<'gc>, value: Pointer<'gc>) -> Pointer<'gc> {
         let Some(io) = self.io_context.pop() else {
-            runtime_crash!("No pending strict operation");
+            info!("End of program, returned with value: {:?}", value);
+            std::process::exit(0);
+            // runtime_crash!("No pending strict operation");
+        };
+
+        let Some(continuation) = self.spine.pop() else {
+            runtime_crash!("Could not pop continuation from spine while resuming {io}")
         };
         match io {
-            IO::Bind { .. } => {
-                let Some(continuation) = self.spine.pop() else {
-                    runtime_crash!("Could not pop continuation from spine while resuming {io}")
-                };
-                Pointer::new(
-                    mc,
-                    // Apply the monadic value to the continuation
-                    Value::App(App {
-                        fun: continuation,
-                        arg: value,
-                    }),
-                )
+            IO::Bind { .. } => Pointer::new(
+                mc,
+                // Apply the monadic value to the continuation, and return that
+                Value::App(App {
+                    fun: continuation,
+                    arg: value,
+                }),
+            ),
+
+            IO::Then => continuation, // Ignore the monadic value, return the continuation
+            IO::Perform => {
+                // Set the top node applying PerformIO to the resulting value
+                // TODO: double check that this is right
+                continuation.set(mc, Value::Ref(value));
+                value // Return the "unwrapped" monadic value
             }
-            IO::Then => {
-                let Some(continuation) = self.spine.pop() else {
-                    runtime_crash!("Could not pop continuation from spine while resuming {io}")
-                };
-                // Ignore the monadic value
-                continuation
-            }
-            IO::Perform => value, // Simply "unwrap" the monadic value
         }
     }
 
@@ -377,19 +398,6 @@ impl<'gc> State<'gc> {
         res
     }
 
-    fn handle_constant<R>(
-        &mut self,
-        mc: &Mutation<'gc>,
-        _op: impl Display,
-        value: R,
-    ) -> Pointer<'gc>
-    where
-        R: Into<Value<'gc>>,
-    {
-        self.tip.set(mc, value.into());
-        self.tip
-    }
-
     fn handle_unop<Q, R>(
         &mut self,
         mc: &Mutation<'gc>,
@@ -408,10 +416,11 @@ impl<'gc> State<'gc> {
         };
         top.forward(mc);
         debug!("    arg 1: {:?}", top.unpack_arg());
-        let arg1 = top.unpack_arg().unpack().try_into().unwrap();
+        let arg1 = top.unpack_arg().follow().unpack().try_into().unwrap();
 
         let value = handler(arg1).into();
         debug!("    returned: {value:?}");
+
         if io {
             self.resume_io(mc, Pointer::new(mc, value))
         } else {
@@ -440,16 +449,17 @@ impl<'gc> State<'gc> {
         };
         top.forward(mc);
         debug!("    arg 1: {:?}", top.unpack_arg());
-        let arg1 = top.unpack_arg().unpack().try_into().unwrap();
+        let arg1 = top.unpack_arg().follow().unpack().try_into().unwrap();
         let Some(mut top) = self.spine.pop() else {
             runtime_crash!("Could not pop arg 1 while evaluating operator {op}")
         };
         top.forward(mc);
         debug!("    arg 2: {:?}", top.unpack_arg());
-        let arg2 = top.unpack_arg().unpack().try_into().unwrap();
+        let arg2 = top.unpack_arg().follow().unpack().try_into().unwrap();
 
         let value = handler(arg1, arg2).into();
         debug!("    returned: {value:?}");
+
         if io {
             self.resume_io(mc, Pointer::new(mc, value))
         } else {
@@ -543,7 +553,9 @@ impl<'gc> State<'gc> {
             Combinator::FShow => todo!("{comb:?}"),
             Combinator::FRead => todo!("{comb:?}"),
 
-            Combinator::PNull => self.handle_constant(mc, comb, ForeignPtr::null()),
+            Combinator::PNull => {
+                unreachable!("0-arity combinator {comb} should not exist at runtime")
+            }
             Combinator::ToPtr => todo!("{comb:?}"),
             Combinator::PCast => self.handle_unop(mc, comb, false, |i: Integer| i),
             Combinator::PEq => todo!("{comb:?}"),
@@ -568,9 +580,15 @@ impl<'gc> State<'gc> {
             Combinator::Serialize => unimplemented!("serialization not supported"),
             Combinator::Deserialize => unimplemented!("deserialization not supported"),
 
-            Combinator::StdIn => self.handle_constant(mc, comb, unsafe { ffi::bfile::mystdin() }),
-            Combinator::StdOut => self.handle_constant(mc, comb, unsafe { ffi::bfile::mystdout() }),
-            Combinator::StdErr => self.handle_constant(mc, comb, unsafe { ffi::bfile::mystderr() }),
+            Combinator::StdIn => {
+                unreachable!("0-arity combinator {comb} should not exist at runtime")
+            }
+            Combinator::StdOut => {
+                unreachable!("0-arity combinator {comb} should not exist at runtime")
+            }
+            Combinator::StdErr => {
+                unreachable!("0-arity combinator {comb} should not exist at runtime")
+            }
             Combinator::Print => unimplemented!("file I/O not supported"),
             Combinator::GetArgs => unimplemented!("CLI not supported"),
             Combinator::GetTimeMilli => todo!("what even are the semantics of this?"),

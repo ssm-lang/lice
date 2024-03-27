@@ -1,6 +1,6 @@
 //! Runtime memory layout for combinator graph reducer.
 
-use crate::ffi::{BadDyn, FfiSymbol, ForeignPtr};
+use crate::ffi::{self, BadDyn, FfiSymbol, ForeignPtr};
 use crate::float::Float;
 use crate::string::VString;
 use crate::tick::{Tick, TickTable};
@@ -213,7 +213,13 @@ impl crate::file::Program {
                         arg: heap[*a],
                     }),
                     Expr::Ref(r) => Value::Ref(heap[self.defs[*r]]),
-                    Expr::Prim(c) => Value::Combinator(*c),
+                    Expr::Prim(c) => match *c {
+                        Combinator::PNull => ForeignPtr::null().into(),
+                        Combinator::StdIn => unsafe { ffi::bfile::mystdin() }.into(),
+                        Combinator::StdOut => unsafe { ffi::bfile::mystdout() }.into(),
+                        Combinator::StdErr => unsafe { ffi::bfile::mystderr() }.into(),
+                        c => Value::Combinator(c),
+                    },
                     Expr::Float(f) => Value::Float(Float::from(*f)),
                     Expr::Int(i) => Value::Integer(Integer::from(*i)),
                     Expr::String(s) => Value::String(VString::new(mc, s)),
