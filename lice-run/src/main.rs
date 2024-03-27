@@ -1,6 +1,6 @@
 use clap::Parser;
 use lice::{eval::VM, file::CombFile};
-use log::error;
+use log::{error, info};
 use std::{fs::File, io::Read, path::PathBuf, process};
 
 #[derive(Parser, Debug)]
@@ -29,10 +29,12 @@ fn main() {
     });
 
     let mut vm = VM::from(c.program);
-    println!("constructed VM");
+    info!("VM constructed");
 
+    let mut i = 0;
     loop {
+        info!("VM step {i}");
         vm.step();
-        println!("stepped");
+        i += 1;
     }
 }
