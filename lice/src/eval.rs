@@ -580,13 +580,7 @@ impl<'gc> State<'gc> {
             Combinator::Serialize => unimplemented!("serialization not supported"),
             Combinator::Deserialize => unimplemented!("deserialization not supported"),
 
-            Combinator::StdIn => {
-                unreachable!("0-arity combinator {comb} should not exist at runtime")
-            }
-            Combinator::StdOut => {
-                unreachable!("0-arity combinator {comb} should not exist at runtime")
-            }
-            Combinator::StdErr => {
+            Combinator::StdIn | Combinator::StdOut | Combinator::StdErr => {
                 unreachable!("0-arity combinator {comb} should not exist at runtime")
             }
             Combinator::Print => unimplemented!("file I/O not supported"),
