@@ -83,7 +83,11 @@ impl<'gc> Node<'gc> {
     }
 
     pub fn unpack_arg(&self) -> Pointer<'gc> {
-        self.unpack().unwrap_app().arg
+        if let Value::App(_) = self.unpack() {
+            self.unpack().unwrap_app().arg
+        } else {
+            panic!("Tried to unwrap non-app node: {self:?}")
+        }
     }
 }
 

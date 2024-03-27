@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::{
     combinator::{Combinator, Reduce, ReduxCode},
-    ffi::{self, FfiSymbol},
+    ffi::{self, FfiSymbol, ForeignPtr},
     float::Float,
     integer::Integer,
     memory::{App, Pointer, Value},
@@ -377,21 +377,24 @@ impl<'gc> State<'gc> {
         res
     }
 
-    fn handle_constant<R>(&mut self, mc: &Mutation<'gc>, op: impl Display, value: R) -> Pointer<'gc>
+    fn handle_constant<R>(
+        &mut self,
+        mc: &Mutation<'gc>,
+        _op: impl Display,
+        value: R,
+    ) -> Pointer<'gc>
     where
         R: Into<Value<'gc>>,
     {
-        let Some(top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
-        };
-        top.set(mc, value.into());
-        top
+        self.tip.set(mc, value.into());
+        self.tip
     }
 
     fn handle_unop<Q, R>(
         &mut self,
         mc: &Mutation<'gc>,
         op: impl Display,
+        io: bool,
         handler: impl FnOnce(Q) -> R,
     ) -> Pointer<'gc>
     where
@@ -399,19 +402,29 @@ impl<'gc> State<'gc> {
         <Q as TryFrom<Value<'gc>>>::Error: core::fmt::Debug,
         R: Into<Value<'gc>>,
     {
+        debug!("handling unop {op}");
         let Some(mut top) = self.spine.pop() else {
             runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
         };
         top.forward(mc);
+        debug!("    arg 1: {:?}", top.unpack_arg());
         let arg1 = top.unpack_arg().unpack().try_into().unwrap();
-        top.set(mc, handler(arg1).into());
-        top
+
+        let value = handler(arg1).into();
+        debug!("    returned: {value:?}");
+        if io {
+            self.resume_io(mc, Pointer::new(mc, value))
+        } else {
+            top.set(mc, value);
+            top
+        }
     }
 
     fn handle_binop<P, Q, R>(
         &mut self,
         mc: &Mutation<'gc>,
         op: impl Display,
+        io: bool,
         handler: impl FnOnce(P, Q) -> R,
     ) -> Pointer<'gc>
     where
@@ -421,16 +434,28 @@ impl<'gc> State<'gc> {
         <Q as TryFrom<Value<'gc>>>::Error: core::fmt::Debug,
         R: Into<Value<'gc>>,
     {
-        let Some(top) = self.spine.pop() else {
+        debug!("handling binop {op}");
+        let Some(mut top) = self.spine.pop() else {
             runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
         };
+        top.forward(mc);
+        debug!("    arg 1: {:?}", top.unpack_arg());
         let arg1 = top.unpack_arg().unpack().try_into().unwrap();
-        let Some(top) = self.spine.pop() else {
+        let Some(mut top) = self.spine.pop() else {
             runtime_crash!("Could not pop arg 1 while evaluating operator {op}")
         };
+        top.forward(mc);
+        debug!("    arg 2: {:?}", top.unpack_arg());
         let arg2 = top.unpack_arg().unpack().try_into().unwrap();
-        top.set(mc, handler(arg1, arg2).into());
-        top
+
+        let value = handler(arg1, arg2).into();
+        debug!("    returned: {value:?}");
+        if io {
+            self.resume_io(mc, Pointer::new(mc, value))
+        } else {
+            top.set(mc, value);
+            top
+        }
     }
 
     /// `next` has been reduced to the given combinator, with all strict arguments evaluated.
@@ -472,55 +497,55 @@ impl<'gc> State<'gc> {
             Combinator::ToFloat => todo!("{comb:?}"),
 
             // Characters and integers have the same underlying representation
-            Combinator::Ord => self.handle_unop(mc, comb, |i: Integer| i),
+            Combinator::Ord => self.handle_unop(mc, comb, false, |i: Integer| i),
             // Characters and integers have the same underlying representation
-            Combinator::Chr => self.handle_unop(mc, comb, |i: Integer| i),
+            Combinator::Chr => self.handle_unop(mc, comb, false, |i: Integer| i),
 
-            Combinator::Neg => self.handle_unop(mc, comb, Integer::ineg),
-            Combinator::Add => self.handle_binop(mc, comb, Integer::iadd),
-            Combinator::Sub => self.handle_binop(mc, comb, Integer::isub),
-            Combinator::Subtract => self.handle_binop(mc, comb, Integer::subtract),
-            Combinator::Mul => self.handle_binop(mc, comb, Integer::imul),
-            Combinator::Quot => self.handle_binop(mc, comb, Integer::iquot),
-            Combinator::Rem => self.handle_binop(mc, comb, Integer::irem),
-            Combinator::Eq => self.handle_binop(mc, comb, Integer::ieq),
-            Combinator::Ne => self.handle_binop(mc, comb, Integer::ine),
-            Combinator::Lt => self.handle_binop(mc, comb, Integer::ilt),
-            Combinator::Le => self.handle_binop(mc, comb, Integer::ile),
-            Combinator::Gt => self.handle_binop(mc, comb, Integer::igt),
-            Combinator::Ge => self.handle_binop(mc, comb, Integer::ige),
-            Combinator::UQuot => self.handle_binop(mc, comb, Integer::uquot),
-            Combinator::URem => self.handle_binop(mc, comb, Integer::urem),
-            Combinator::ULt => self.handle_binop(mc, comb, Integer::ult),
-            Combinator::ULe => self.handle_binop(mc, comb, Integer::ule),
-            Combinator::UGt => self.handle_binop(mc, comb, Integer::ugt),
-            Combinator::UGe => self.handle_binop(mc, comb, Integer::uge),
-            Combinator::Inv => self.handle_unop(mc, comb, Integer::binv),
-            Combinator::And => self.handle_binop(mc, comb, Integer::band),
-            Combinator::Or => self.handle_binop(mc, comb, Integer::bor),
-            Combinator::Xor => self.handle_binop(mc, comb, Integer::bxor),
-            Combinator::Shl => self.handle_binop(mc, comb, Integer::ushl),
-            Combinator::Shr => self.handle_binop(mc, comb, Integer::ushr),
-            Combinator::AShr => self.handle_binop(mc, comb, Integer::ashr),
+            Combinator::Neg => self.handle_unop(mc, comb, false, Integer::ineg),
+            Combinator::Add => self.handle_binop(mc, comb, false, Integer::iadd),
+            Combinator::Sub => self.handle_binop(mc, comb, false, Integer::isub),
+            Combinator::Subtract => self.handle_binop(mc, comb, false, Integer::subtract),
+            Combinator::Mul => self.handle_binop(mc, comb, false, Integer::imul),
+            Combinator::Quot => self.handle_binop(mc, comb, false, Integer::iquot),
+            Combinator::Rem => self.handle_binop(mc, comb, false, Integer::irem),
+            Combinator::Eq => self.handle_binop(mc, comb, false, Integer::ieq),
+            Combinator::Ne => self.handle_binop(mc, comb, false, Integer::ine),
+            Combinator::Lt => self.handle_binop(mc, comb, false, Integer::ilt),
+            Combinator::Le => self.handle_binop(mc, comb, false, Integer::ile),
+            Combinator::Gt => self.handle_binop(mc, comb, false, Integer::igt),
+            Combinator::Ge => self.handle_binop(mc, comb, false, Integer::ige),
+            Combinator::UQuot => self.handle_binop(mc, comb, false, Integer::uquot),
+            Combinator::URem => self.handle_binop(mc, comb, false, Integer::urem),
+            Combinator::ULt => self.handle_binop(mc, comb, false, Integer::ult),
+            Combinator::ULe => self.handle_binop(mc, comb, false, Integer::ule),
+            Combinator::UGt => self.handle_binop(mc, comb, false, Integer::ugt),
+            Combinator::UGe => self.handle_binop(mc, comb, false, Integer::uge),
+            Combinator::Inv => self.handle_unop(mc, comb, false, Integer::binv),
+            Combinator::And => self.handle_binop(mc, comb, false, Integer::band),
+            Combinator::Or => self.handle_binop(mc, comb, false, Integer::bor),
+            Combinator::Xor => self.handle_binop(mc, comb, false, Integer::bxor),
+            Combinator::Shl => self.handle_binop(mc, comb, false, Integer::ushl),
+            Combinator::Shr => self.handle_binop(mc, comb, false, Integer::ushr),
+            Combinator::AShr => self.handle_binop(mc, comb, false, Integer::ashr),
 
-            Combinator::FNeg => self.handle_unop(mc, comb, Float::fneg),
-            Combinator::FAdd => self.handle_binop(mc, comb, Float::fadd),
-            Combinator::FSub => self.handle_binop(mc, comb, Float::fsub),
-            Combinator::FMul => self.handle_binop(mc, comb, Float::fmul),
-            Combinator::FDiv => self.handle_binop(mc, comb, Float::fdiv),
-            Combinator::FEq => self.handle_binop(mc, comb, Float::feq),
-            Combinator::FNe => self.handle_binop(mc, comb, Float::fne),
-            Combinator::FLt => self.handle_binop(mc, comb, Float::flt),
-            Combinator::FLe => self.handle_binop(mc, comb, Float::fle),
-            Combinator::FGt => self.handle_binop(mc, comb, Float::fgt),
-            Combinator::FGe => self.handle_binop(mc, comb, Float::fge),
-            Combinator::IToF => self.handle_unop(mc, comb, Float::from_integer),
+            Combinator::FNeg => self.handle_unop(mc, comb, false, Float::fneg),
+            Combinator::FAdd => self.handle_binop(mc, comb, false, Float::fadd),
+            Combinator::FSub => self.handle_binop(mc, comb, false, Float::fsub),
+            Combinator::FMul => self.handle_binop(mc, comb, false, Float::fmul),
+            Combinator::FDiv => self.handle_binop(mc, comb, false, Float::fdiv),
+            Combinator::FEq => self.handle_binop(mc, comb, false, Float::feq),
+            Combinator::FNe => self.handle_binop(mc, comb, false, Float::fne),
+            Combinator::FLt => self.handle_binop(mc, comb, false, Float::flt),
+            Combinator::FLe => self.handle_binop(mc, comb, false, Float::fle),
+            Combinator::FGt => self.handle_binop(mc, comb, false, Float::fgt),
+            Combinator::FGe => self.handle_binop(mc, comb, false, Float::fge),
+            Combinator::IToF => self.handle_unop(mc, comb, false, Float::from_integer),
             Combinator::FShow => todo!("{comb:?}"),
             Combinator::FRead => todo!("{comb:?}"),
 
-            Combinator::PNull => todo!("{comb:?}"),
+            Combinator::PNull => self.handle_constant(mc, comb, ForeignPtr::null()),
             Combinator::ToPtr => todo!("{comb:?}"),
-            Combinator::PCast => todo!("{comb:?}"),
+            Combinator::PCast => self.handle_unop(mc, comb, false, |i: Integer| i),
             Combinator::PEq => todo!("{comb:?}"),
             Combinator::PAdd => todo!("{comb:?}"),
             Combinator::PSub => todo!("{comb:?}"),
@@ -529,8 +554,8 @@ impl<'gc> State<'gc> {
                 let Some(top) = self.spine.pop() else {
                     runtime_crash!("Could not pop arg 0 while evaluating operator {comb}")
                 };
-                let arg = top.unpack_arg();
-                self.resume_io(mc, arg)
+                let value = top.unpack_arg();
+                self.resume_io(mc, value)
             }
             Combinator::Bind => self.start_io(mc, IO::Bind { cc: false }),
             Combinator::CCBind => self.start_io(mc, IO::Bind { cc: true }),
@@ -573,28 +598,29 @@ impl<'gc> State<'gc> {
             };
         }
 
+        // FFI calls are made in the IO monad, so we need to handle it as such
         match ffi {
-            FfiSymbol::acos => self.handle_unop(mc, ffi, Float::facos),
-            FfiSymbol::asin => self.handle_unop(mc, ffi, Float::fasin),
-            FfiSymbol::atan => self.handle_unop(mc, ffi, Float::fatan),
-            FfiSymbol::atan2 => self.handle_binop(mc, ffi, Float::fatan2),
-            FfiSymbol::cos => self.handle_unop(mc, ffi, Float::fcos),
-            FfiSymbol::exp => self.handle_unop(mc, ffi, Float::fexp),
-            FfiSymbol::log => self.handle_binop(mc, ffi, Float::flog),
-            FfiSymbol::sin => self.handle_unop(mc, ffi, Float::fsin),
-            FfiSymbol::sqrt => self.handle_unop(mc, ffi, Float::fsqrt),
-            FfiSymbol::tan => self.handle_unop(mc, ffi, Float::ftan),
-            FfiSymbol::fopen => self.handle_binop(mc, ffi, ffi!(libc::fopen:(_, _))),
-            FfiSymbol::add_FILE => self.handle_unop(mc, ffi, ffi!(ffi::bfile::add_FILE:(_))),
-            FfiSymbol::add_utf8 => self.handle_unop(mc, ffi, ffi!(ffi::bfile::add_utf8:(_))),
-            FfiSymbol::closeb => self.handle_unop(mc, ffi, ffi!(ffi::bfile::closeb:(_))),
-            FfiSymbol::flushb => self.handle_unop(mc, ffi, ffi!(ffi::bfile::flushb:(_))),
-            FfiSymbol::getb => self.handle_unop(mc, ffi, ffi!(ffi::bfile::getb:(_))),
-            FfiSymbol::putb => self.handle_binop(mc, ffi, ffi!(ffi::bfile::putb:(_, _))),
-            FfiSymbol::ungetb => self.handle_binop(mc, ffi, ffi!(ffi::bfile::ungetb:(_, _))),
-            FfiSymbol::system => self.handle_unop(mc, ffi, ffi!(libc::system:(_))),
+            FfiSymbol::acos => self.handle_unop(mc, ffi, true, Float::facos),
+            FfiSymbol::asin => self.handle_unop(mc, ffi, true, Float::fasin),
+            FfiSymbol::atan => self.handle_unop(mc, ffi, true, Float::fatan),
+            FfiSymbol::atan2 => self.handle_binop(mc, ffi, true, Float::fatan2),
+            FfiSymbol::cos => self.handle_unop(mc, ffi, true, Float::fcos),
+            FfiSymbol::exp => self.handle_unop(mc, ffi, true, Float::fexp),
+            FfiSymbol::log => self.handle_binop(mc, ffi, true, Float::flog),
+            FfiSymbol::sin => self.handle_unop(mc, ffi, true, Float::fsin),
+            FfiSymbol::sqrt => self.handle_unop(mc, ffi, true, Float::fsqrt),
+            FfiSymbol::tan => self.handle_unop(mc, ffi, true, Float::ftan),
+            FfiSymbol::fopen => self.handle_binop(mc, ffi, true, ffi!(libc::fopen:(_, _))),
+            FfiSymbol::add_FILE => self.handle_unop(mc, ffi, true, ffi!(ffi::bfile::add_FILE:(_))),
+            FfiSymbol::add_utf8 => self.handle_unop(mc, ffi, true, ffi!(ffi::bfile::add_utf8:(_))),
+            FfiSymbol::closeb => self.handle_unop(mc, ffi, true, ffi!(ffi::bfile::closeb:(_))),
+            FfiSymbol::flushb => self.handle_unop(mc, ffi, true, ffi!(ffi::bfile::flushb:(_))),
+            FfiSymbol::getb => self.handle_unop(mc, ffi, true, ffi!(ffi::bfile::getb:(_))),
+            FfiSymbol::putb => self.handle_binop(mc, ffi, true, ffi!(ffi::bfile::putb:(_, _))),
+            FfiSymbol::ungetb => self.handle_binop(mc, ffi, true, ffi!(ffi::bfile::ungetb:(_, _))),
+            FfiSymbol::system => self.handle_unop(mc, ffi, true, ffi!(libc::system:(_))),
             FfiSymbol::tmpname => todo!("{ffi:?}"),
-            FfiSymbol::unlink => self.handle_unop(mc, ffi, ffi!(libc::unlink:(_))),
+            FfiSymbol::unlink => self.handle_unop(mc, ffi, true, ffi!(libc::unlink:(_))),
         }
     }
 

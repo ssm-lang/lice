@@ -2,7 +2,7 @@
 // - how many args (arity); all need to be evaluated strictly
 // - types of args and return value; also includes ffi types
 use crate::{memory::Value, string::VString};
-use core::str::FromStr;
+use core::{ptr::null, str::FromStr};
 use gc_arena::{Collect, Mutation};
 use lice_macros::Reduce;
 
@@ -15,6 +15,12 @@ unsafe impl Collect for ForeignPtr {
         false
     }
     fn trace(&self, _cc: &gc_arena::Collection) {}
+}
+
+impl ForeignPtr {
+    pub fn null() -> Self {
+        Self::from(null::<()>())
+    }
 }
 
 impl<T> From<*mut T> for ForeignPtr {
