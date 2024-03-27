@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::{
     combinator::{Combinator, Reduce, ReduxCode},
-    ffi::{self, FfiSymbol, ForeignPtr},
+    ffi::{self, FfiSymbol},
     float::Float,
     integer::Integer,
     memory::{App, Pointer, Value},
