@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use crate::{
     combinator::{Combinator, Reduce, ReduxCode},
+    ffi::{self, FfiSymbol},
     float::Float,
     integer::Integer,
     memory::{App, Pointer, Value},
@@ -57,18 +58,34 @@ impl<'gc> Spine<'gc> {
     }
 }
 
-/// Pending strict evaluation some combinator's arguments.
-#[derive(Collect, Clone, Copy)]
+#[derive(Debug, Collect, Clone, Copy)]
 #[collect(require_static)]
-struct Strict {
-    comb: Combinator,
-    args: BitArr!(for Self::MAX_ARGS),
+enum Strict {
+    Combinator(Combinator),
+    Ffi(FfiSymbol),
 }
 
 impl Strict {
+    fn strictness(&self) -> &'static [bool] {
+        match self {
+            Strict::Combinator(c) => c.strictness(),
+            Strict::Ffi(f) => f.strictness(),
+        }
+    }
+}
+
+/// Pending strict evaluation some combinator's arguments.
+#[derive(Debug, Collect, Clone, Copy)]
+#[collect(require_static)]
+struct StrictWork {
+    strict: Strict,
+    args: BitArr!(for Self::MAX_ARGS),
+}
+
+impl StrictWork {
     const MAX_ARGS: usize = 4;
 
-    fn init<'gc>(comb: Combinator, spine: &Spine<'gc>) -> Option<(Self, Pointer<'gc>)> {
+    fn init<'gc>(strict: Strict, spine: &Spine<'gc>) -> Option<(Self, Pointer<'gc>)> {
         // Figure out which args need to be evaluated, i.e., are not yet WHNF
         // Default state: we don't need to evalute each arg
         let mut args = BitArray::new([0]);
@@ -76,9 +93,9 @@ impl Strict {
         // Also find index of first argument that needs evaluating
         let first = OnceCell::new();
 
-        for (idx, &strict) in comb.strictness().iter().enumerate() {
+        for (idx, &strict) in strict.strictness().iter().enumerate() {
             let Some(app) = spine.peek(idx) else {
-                runtime_crash!("Arg {idx} not present for strict combinator {comb}")
+                runtime_crash!("Arg {idx} not present for {strict:?}")
             };
             if strict && !app.unpack_arg().unpack().whnf() {
                 // Remember the first argument that needs evaluating:
@@ -91,7 +108,10 @@ impl Strict {
             }
         }
         let first = *first.get()?; // If no args need to be evaluated, then return None
-        Some((Self { comb, args }, spine.peek(first).unwrap().unpack_arg()))
+        Some((
+            Self { strict, args },
+            spine.peek(first).unwrap().unpack_arg(),
+        ))
     }
 
     /// Advance the pending arg state.
@@ -102,7 +122,10 @@ impl Strict {
                 self.args.set(idx, false);
 
                 let Some(app) = spine.peek(idx) else {
-                    runtime_crash!("Arg {idx} not present for strict combinator {}", self.comb)
+                    runtime_crash!(
+                        "Arg {idx} not present for strict combinator {:?}",
+                        self.strict
+                    )
                 };
                 if !app.unpack_arg().unpack().whnf() {
                     // Only evaluate this arg next if it is not in WHNF yet
@@ -148,7 +171,7 @@ impl Display for IO {
 struct State<'gc> {
     tip: Pointer<'gc>,
     spine: Spine<'gc>,
-    strict_context: Vec<Strict>,
+    strict_context: Vec<StrictWork>,
     io_context: Vec<IO>,
     tick_table: TickTable,
 }
@@ -227,13 +250,13 @@ impl<'gc> State<'gc> {
         }
     }
 
-    fn start_strict(&mut self, comb: Combinator) -> Option<Pointer<'gc>> {
-        let (strict, first) = Strict::init(comb, &self.spine)?;
+    fn start_strict(&mut self, strict: Strict) -> Option<Pointer<'gc>> {
+        let (strict, first) = StrictWork::init(strict, &self.spine)?;
         self.strict_context.push(strict);
         Some(first)
     }
 
-    fn resume_strict(&mut self) -> Result<Pointer<'gc>, Combinator> {
+    fn resume_strict(&mut self) -> Result<Pointer<'gc>, Strict> {
         let Some(strict) = self.strict_context.last_mut() else {
             runtime_crash!("No pending strict operation");
         };
@@ -241,7 +264,7 @@ impl<'gc> State<'gc> {
         if let Some(next) = strict.advance(&self.spine) {
             Ok(next)
         } else {
-            let comb = strict.comb;
+            let comb = strict.strict;
             self.strict_context.pop();
             Err(comb)
         }
@@ -354,47 +377,59 @@ impl<'gc> State<'gc> {
         res
     }
 
-    fn handle_unop<Q, R>(
-        &mut self,
-        mc: &Mutation<'gc>,
-        comb: Combinator,
-        handler: impl FnOnce(&Q) -> R,
-    ) -> Pointer<'gc>
+    fn handle_constant<R>(&mut self, mc: &Mutation<'gc>, op: impl Display, value: R) -> Pointer<'gc>
     where
-        Q: TryFrom<Value<'gc>>,
-        <Q as TryFrom<Value<'gc>>>::Error: core::fmt::Debug,
         R: Into<Value<'gc>>,
     {
         let Some(top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 0 while evaluating operator {comb}")
+            runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
         };
+        top.set(mc, value.into());
+        top
+    }
+
+    fn handle_unop<Q, R>(
+        &mut self,
+        mc: &Mutation<'gc>,
+        op: impl Display,
+        handler: impl FnOnce(Q) -> R,
+    ) -> Pointer<'gc>
+    where
+        Q: Copy + TryFrom<Value<'gc>>,
+        <Q as TryFrom<Value<'gc>>>::Error: core::fmt::Debug,
+        R: Into<Value<'gc>>,
+    {
+        let Some(mut top) = self.spine.pop() else {
+            runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
+        };
+        top.forward(mc);
         let arg1 = top.unpack_arg().unpack().try_into().unwrap();
-        top.set(mc, handler(&arg1).into());
+        top.set(mc, handler(arg1).into());
         top
     }
 
     fn handle_binop<P, Q, R>(
         &mut self,
         mc: &Mutation<'gc>,
-        comb: Combinator,
-        handler: impl FnOnce(&P, &Q) -> R,
+        op: impl Display,
+        handler: impl FnOnce(P, Q) -> R,
     ) -> Pointer<'gc>
     where
-        P: TryFrom<Value<'gc>>,
+        P: Copy + TryFrom<Value<'gc>>,
         <P as TryFrom<Value<'gc>>>::Error: core::fmt::Debug,
-        Q: TryFrom<Value<'gc>>,
+        Q: Copy + TryFrom<Value<'gc>>,
         <Q as TryFrom<Value<'gc>>>::Error: core::fmt::Debug,
         R: Into<Value<'gc>>,
     {
         let Some(top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 0 while evaluating operator {comb}")
+            runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
         };
         let arg1 = top.unpack_arg().unpack().try_into().unwrap();
         let Some(top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 1 while evaluating operator {comb}")
+            runtime_crash!("Could not pop arg 1 while evaluating operator {op}")
         };
         let arg2 = top.unpack_arg().unpack().try_into().unwrap();
-        top.set(mc, handler(&arg1, &arg2).into());
+        top.set(mc, handler(arg1, arg2).into());
         top
     }
 
@@ -424,20 +459,22 @@ impl<'gc> State<'gc> {
 
             Combinator::Seq => self.do_redux(mc, comb), // Seq has a trivial redux code
             Combinator::Rnf => unimplemented!("RNF not implemented"),
-            Combinator::ErrorMsg => todo!(),
-            Combinator::NoDefault => todo!(),
-            Combinator::NoMatch => todo!(),
+            Combinator::ErrorMsg => todo!("{comb:?}"),
+            Combinator::NoDefault => todo!("{comb:?}"),
+            Combinator::NoMatch => todo!("{comb:?}"),
 
-            Combinator::Equal => todo!(),
-            Combinator::StrEqual => todo!(),
-            Combinator::Compare => todo!(),
-            Combinator::StrCmp => todo!(),
-            Combinator::IntCmp => todo!(),
-            Combinator::ToInt => todo!(),
-            Combinator::ToFloat => todo!(),
+            Combinator::Equal => todo!("{comb:?}"),
+            Combinator::StrEqual => todo!("{comb:?}"),
+            Combinator::Compare => todo!("{comb:?}"),
+            Combinator::StrCmp => todo!("{comb:?}"),
+            Combinator::IntCmp => todo!("{comb:?}"),
+            Combinator::ToInt => todo!("{comb:?}"),
+            Combinator::ToFloat => todo!("{comb:?}"),
 
-            Combinator::Ord => todo!(),
-            Combinator::Chr => todo!(),
+            // Characters and integers have the same underlying representation
+            Combinator::Ord => self.handle_unop(mc, comb, |i: Integer| i),
+            // Characters and integers have the same underlying representation
+            Combinator::Chr => self.handle_unop(mc, comb, |i: Integer| i),
 
             Combinator::Neg => self.handle_unop(mc, comb, Integer::ineg),
             Combinator::Add => self.handle_binop(mc, comb, Integer::iadd),
@@ -446,8 +483,8 @@ impl<'gc> State<'gc> {
             Combinator::Mul => self.handle_binop(mc, comb, Integer::imul),
             Combinator::Quot => self.handle_binop(mc, comb, Integer::iquot),
             Combinator::Rem => self.handle_binop(mc, comb, Integer::irem),
-            Combinator::Eq => self.handle_binop(mc, comb, Integer::eq),
-            Combinator::Ne => self.handle_binop(mc, comb, Integer::ne),
+            Combinator::Eq => self.handle_binop(mc, comb, Integer::ieq),
+            Combinator::Ne => self.handle_binop(mc, comb, Integer::ine),
             Combinator::Lt => self.handle_binop(mc, comb, Integer::ilt),
             Combinator::Le => self.handle_binop(mc, comb, Integer::ile),
             Combinator::Gt => self.handle_binop(mc, comb, Integer::igt),
@@ -471,22 +508,22 @@ impl<'gc> State<'gc> {
             Combinator::FSub => self.handle_binop(mc, comb, Float::fsub),
             Combinator::FMul => self.handle_binop(mc, comb, Float::fmul),
             Combinator::FDiv => self.handle_binop(mc, comb, Float::fdiv),
-            Combinator::FEq => self.handle_binop(mc, comb, Float::eq),
-            Combinator::FNe => self.handle_binop(mc, comb, Float::ne),
-            Combinator::FLt => self.handle_binop(mc, comb, Float::lt),
-            Combinator::FLe => self.handle_binop(mc, comb, Float::le),
-            Combinator::FGt => self.handle_binop(mc, comb, Float::gt),
-            Combinator::FGe => self.handle_binop(mc, comb, Float::ge),
+            Combinator::FEq => self.handle_binop(mc, comb, Float::feq),
+            Combinator::FNe => self.handle_binop(mc, comb, Float::fne),
+            Combinator::FLt => self.handle_binop(mc, comb, Float::flt),
+            Combinator::FLe => self.handle_binop(mc, comb, Float::fle),
+            Combinator::FGt => self.handle_binop(mc, comb, Float::fgt),
+            Combinator::FGe => self.handle_binop(mc, comb, Float::fge),
             Combinator::IToF => self.handle_unop(mc, comb, Float::from_integer),
-            Combinator::FShow => todo!(),
-            Combinator::FRead => todo!(),
+            Combinator::FShow => todo!("{comb:?}"),
+            Combinator::FRead => todo!("{comb:?}"),
 
-            Combinator::PNull => todo!(),
-            Combinator::ToPtr => todo!(),
-            Combinator::PCast => todo!(),
-            Combinator::PEq => todo!(),
-            Combinator::PAdd => todo!(),
-            Combinator::PSub => todo!(),
+            Combinator::PNull => todo!("{comb:?}"),
+            Combinator::ToPtr => todo!("{comb:?}"),
+            Combinator::PCast => todo!("{comb:?}"),
+            Combinator::PEq => todo!("{comb:?}"),
+            Combinator::PAdd => todo!("{comb:?}"),
+            Combinator::PSub => todo!("{comb:?}"),
 
             Combinator::Return => {
                 let Some(top) = self.spine.pop() else {
@@ -506,23 +543,58 @@ impl<'gc> State<'gc> {
             Combinator::Serialize => unimplemented!("serialization not supported"),
             Combinator::Deserialize => unimplemented!("deserialization not supported"),
 
-            Combinator::StdIn => unimplemented!("file I/O not supported"),
-            Combinator::StdOut => unimplemented!("file I/O not supported"),
-            Combinator::StdErr => unimplemented!("file I/O not supported"),
+            Combinator::StdIn => self.handle_constant(mc, comb, unsafe { ffi::bfile::mystdin() }),
+            Combinator::StdOut => self.handle_constant(mc, comb, unsafe { ffi::bfile::mystdout() }),
+            Combinator::StdErr => self.handle_constant(mc, comb, unsafe { ffi::bfile::mystderr() }),
             Combinator::Print => unimplemented!("file I/O not supported"),
             Combinator::GetArgs => unimplemented!("CLI not supported"),
             Combinator::GetTimeMilli => todo!("what even are the semantics of this?"),
 
-            Combinator::ArrAlloc => todo!(),
-            Combinator::ArrSize => todo!(),
-            Combinator::ArrRead => todo!(),
-            Combinator::ArrWrite => todo!(),
-            Combinator::ArrEq => todo!(),
+            Combinator::ArrAlloc => todo!("{comb:?}"),
+            Combinator::ArrSize => todo!("{comb:?}"),
+            Combinator::ArrRead => todo!("{comb:?}"),
+            Combinator::ArrWrite => todo!("{comb:?}"),
+            Combinator::ArrEq => todo!("{comb:?}"),
 
             Combinator::FromUtf8 => self.handle_from_utf8(mc),
-            Combinator::CStringNew => todo!(),
-            Combinator::CStringPeek => todo!(),
-            Combinator::CStringPeekLen => todo!(),
+            Combinator::CStringNew => todo!("{comb:?}"),
+            Combinator::CStringPeek => todo!("{comb:?}"),
+            Combinator::CStringPeekLen => todo!("{comb:?}"),
+        }
+    }
+
+    fn handle_ffi(&mut self, ffi: FfiSymbol, mc: &Mutation<'gc>) -> Pointer<'gc> {
+        macro_rules! ffi {
+            ($func:path:(_)) => {
+                |x: _| unsafe { $func(x) }
+            };
+            ($func:path:(_, _)) => {
+                |x: _, y: _| unsafe { $func(x, y) }
+            };
+        }
+
+        match ffi {
+            FfiSymbol::acos => self.handle_unop(mc, ffi, Float::facos),
+            FfiSymbol::asin => self.handle_unop(mc, ffi, Float::fasin),
+            FfiSymbol::atan => self.handle_unop(mc, ffi, Float::fatan),
+            FfiSymbol::atan2 => self.handle_binop(mc, ffi, Float::fatan2),
+            FfiSymbol::cos => self.handle_unop(mc, ffi, Float::fcos),
+            FfiSymbol::exp => self.handle_unop(mc, ffi, Float::fexp),
+            FfiSymbol::log => self.handle_binop(mc, ffi, Float::flog),
+            FfiSymbol::sin => self.handle_unop(mc, ffi, Float::fsin),
+            FfiSymbol::sqrt => self.handle_unop(mc, ffi, Float::fsqrt),
+            FfiSymbol::tan => self.handle_unop(mc, ffi, Float::ftan),
+            FfiSymbol::fopen => self.handle_binop(mc, ffi, ffi!(libc::fopen:(_, _))),
+            FfiSymbol::add_FILE => self.handle_unop(mc, ffi, ffi!(ffi::bfile::add_FILE:(_))),
+            FfiSymbol::add_utf8 => self.handle_unop(mc, ffi, ffi!(ffi::bfile::add_utf8:(_))),
+            FfiSymbol::closeb => self.handle_unop(mc, ffi, ffi!(ffi::bfile::closeb:(_))),
+            FfiSymbol::flushb => self.handle_unop(mc, ffi, ffi!(ffi::bfile::flushb:(_))),
+            FfiSymbol::getb => self.handle_unop(mc, ffi, ffi!(ffi::bfile::getb:(_))),
+            FfiSymbol::putb => self.handle_binop(mc, ffi, ffi!(ffi::bfile::putb:(_, _))),
+            FfiSymbol::ungetb => self.handle_binop(mc, ffi, ffi!(ffi::bfile::ungetb:(_, _))),
+            FfiSymbol::system => self.handle_unop(mc, ffi, ffi!(libc::system:(_))),
+            FfiSymbol::tmpname => todo!("{ffi:?}"),
+            FfiSymbol::unlink => self.handle_unop(mc, ffi, ffi!(libc::unlink:(_))),
         }
     }
 
@@ -541,25 +613,22 @@ impl<'gc> State<'gc> {
                 self.spine.push(cur);
                 fun
             }
-            Value::Combinator(comb) => {
-                match self.start_strict(comb) {
-                    // `next` has been reduced to a combinator, though one or more of its arguments
-                    // still need to be evaluated before it can be handled
-                    Some(next) => next,
-                    // `next` has been reduced a combinator and is ready to be handled
-                    None => self.handle_comb(comb, mc),
-                }
-            }
-            Value::String(_) | Value::Integer(_) | Value::Float(_) => {
-                // `next` has been reduced to a value, so we need to check the continuation
-                // context to see what to do next
-                match self.resume_strict() {
-                    // Still need to evaluate something else
-                    Ok(next) => next,
-                    // Time to handle the returned combinator
-                    Err(comb) => self.handle_comb(comb, mc),
-                }
-            }
+            Value::Combinator(comb) => self
+                // `next` has been reduced to a combinator, though one or more of its arguments
+                // may still need to be evaluated before it can be handled
+                .start_strict(Strict::Combinator(comb))
+                // If start_strict returns None, then we can directly handle the combinator
+                .unwrap_or_else(|| self.handle_comb(comb, mc)),
+            Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::ForeignPtr(_) => self
+                // `next` has been reduced to a value, probably because some strict operator had
+                // previously demanded strict arguments. We check our strict continuation context
+                // to see if we still need to evaluate more arguments, or if we can now handle the
+                // strict operator.
+                .resume_strict()
+                .unwrap_or_else(|strict| match strict {
+                    Strict::Combinator(comb) => self.handle_comb(comb, mc),
+                    Strict::Ffi(ffi) => self.handle_ffi(ffi, mc),
+                }),
             Value::Tick(t) => {
                 self.tick_table.tick(t);
                 let Some(next) = self.spine.pop() else {
@@ -570,9 +639,10 @@ impl<'gc> State<'gc> {
                 };
                 next.unpack_arg()
             }
-            v @ Value::Ffi(_) => {
-                panic!("don't know how to handle {v:?} yet")
-            }
+            Value::Ffi(ffi) => self
+                .start_strict(Strict::Ffi(ffi))
+                .unwrap_or_else(|| self.handle_ffi(ffi, mc)),
+            Value::BadDyn(sym) => panic!("FFI unknown {}", sym.name()),
         };
 
         debug!("END step");

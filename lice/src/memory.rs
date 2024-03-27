@@ -1,6 +1,6 @@
 //! Runtime memory layout for combinator graph reducer.
 
-use crate::ffi::Ffi;
+use crate::ffi::{BadDyn, FfiSymbol, ForeignPtr};
 use crate::float::Float;
 use crate::string::VString;
 use crate::tick::{Tick, TickTable};
@@ -57,8 +57,10 @@ pub enum Value<'gc> {
     String(VString<'gc>),
     Integer(Integer),
     Float(Float),
-    Ffi(Ffi<'gc>),
+    BadDyn(BadDyn<'gc>),
+    Ffi(FfiSymbol),
     Tick(Tick),
+    ForeignPtr(ForeignPtr),
 }
 
 // Combinators are just constant values.
@@ -212,7 +214,13 @@ impl crate::file::Program {
                     Expr::Int(i) => Value::Integer(Integer::from(*i)),
                     Expr::String(s) => Value::String(VString::new(mc, s)),
                     Expr::Tick(name) => Value::Tick(tick_table.add_entry(name)),
-                    Expr::Ffi(name) => Value::Ffi(Ffi::new(mc, name)),
+                    Expr::Ffi(name) => FfiSymbol::lookup(name).map_or_else(
+                        || {
+                            println!("Could not find {name}");
+                            Value::BadDyn(BadDyn::new(mc, name))
+                        },
+                        Value::Ffi,
+                    ),
                     Expr::Array(_, _) => todo!("arrays"),
                     Expr::Unknown(s) => panic!("unable to deserialize {s}"),
                 },

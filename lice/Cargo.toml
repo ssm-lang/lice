@@ -19,6 +19,8 @@ rt = [
   "dep:heapless",
   "dep:bitvec",
   "dep:derive_more",
+  "dep:read_char",
+  "dep:once_cell",
 ]
 
 [dependencies]
@@ -42,3 +44,10 @@ zerocopy-derive = { optional = true, version = "0.7" }
 heapless        = { optional = true, version = "0.8" }
 bitvec          = { optional = true, version = "1" }
 derive_more     = { optional = true, version = "0.99" }
+read_char       = { optional = true, version = "0.1" }
+once_cell       = { optional = true, version = "1.19" }
+libc            = "0.2.153"
+
+[build-dependencies]
+bindgen = { version = "0.69" }
+cc      = { version = "1.0" }
