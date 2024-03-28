@@ -13,9 +13,6 @@ cd "$root"
 cd MicroHs || exit 1
 make "$MHS"
 
-mkdir -p ../combs
-rm -rf ../combs/*
-
 compile() {
   module="$1"
   indir="$2"
@@ -34,6 +31,9 @@ compile() {
   fi
   set -e
 }
+
+mkdir -p ../combs
+rm -rf ../combs/*
 
 compile Example .
 
