@@ -11,7 +11,7 @@ use nom::{
     combinator::{map_res, opt, recognize, verify},
     multi::fold_many0,
     number::complete::double,
-    sequence::{delimited, preceded, separated_pair},
+    sequence::{delimited, preceded, separated_pair, terminated},
     IResult, Parser,
 };
 use parse_display::Display;
@@ -240,7 +240,10 @@ fn string_literal(input: &str) -> Parse<String> {
     let literal = verify(is_not("\"\\"), |s: &str| !s.is_empty());
     let escaped_char = preceded(
         char('\\'),
-        map_res(digit1, |s: &str| s.parse::<u8>()).map(|n| n as char),
+        terminated(
+            map_res(digit1, |s: &str| s.parse::<u8>()).map(|n| n as char),
+            char('&'),
+        ),
     );
 
     let build_string = fold_many0(
