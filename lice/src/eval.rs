@@ -218,7 +218,7 @@ impl<'gc> State<'gc> {
         let code = unwrap!(comb.redux());
 
         let mut top = self.tip;
-        let mut args = heapless::Vec::<_, 4>::new();
+        let mut args = heapless::Vec::<_, 8>::new();
         let mut stk = heapless::Vec::<_, 8>::new();
 
         for i in 0..comb.arity() {
@@ -680,7 +680,7 @@ impl<'gc> State<'gc> {
             Value::Ffi(ffi) => self
                 .start_strict(Strict::Ffi(ffi))
                 .unwrap_or_else(|| self.handle_ffi(ffi, mc)),
-            Value::BadDyn(sym) => panic!("FFI unknown {}", sym.name()),
+            Value::BadDyn(sym) => panic!("missing FFI symbol: {}", sym.name()),
         };
 
         debug!("END step");
