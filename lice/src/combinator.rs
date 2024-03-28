@@ -405,9 +405,9 @@ pub enum Combinator {
     #[display("IO.print")]
     #[reduce(from = "!file_ptr !term")]
     Print,
-    #[display("IO.getArgs")]
+    #[display("IO.getArgRef")]
     #[reduce(constant)]
-    GetArgs,
+    GetArgRef,
     #[display("IO.getTimeMilli")]
     #[reduce(from = "FIXME")] // TODO: how is this evaluated?
     GetTimeMilli,

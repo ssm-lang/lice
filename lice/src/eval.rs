@@ -574,8 +574,8 @@ impl<'gc> State<'gc> {
             Combinator::Then => self.start_io(mc, IO::Then),
             Combinator::PerformIO => self.start_io(mc, IO::Perform),
 
-            Combinator::Catch => todo!("Need to save stack state"),
-            Combinator::DynSym => unimplemented!("FFI is not supported"),
+            Combinator::Catch => todo!("{comb:?}: need to save stack state"),
+            Combinator::DynSym => todo!("{comb:?}: dynamic FFI"),
 
             Combinator::Serialize => unimplemented!("serialization not supported"),
             Combinator::Deserialize => unimplemented!("deserialization not supported"),
@@ -583,9 +583,9 @@ impl<'gc> State<'gc> {
             Combinator::StdIn | Combinator::StdOut | Combinator::StdErr => {
                 unreachable!("0-arity combinator {comb} should not exist at runtime")
             }
-            Combinator::Print => unimplemented!("file I/O not supported"),
-            Combinator::GetArgs => unimplemented!("CLI not supported"),
-            Combinator::GetTimeMilli => todo!("what even are the semantics of this?"),
+            Combinator::Print => todo!("{comb:?}"),
+            Combinator::GetArgRef => todo!("{comb:?}"),
+            Combinator::GetTimeMilli => todo!("{comb:?}"),
 
             Combinator::ArrAlloc => todo!("{comb:?}"),
             Combinator::ArrSize => todo!("{comb:?}"),
