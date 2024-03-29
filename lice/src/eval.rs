@@ -785,6 +785,26 @@ mod tests {
     #[test]
     fn arith420_nested() {
         // TODO: something like (40 + 2) * 10
+        type Root = Rootable![(State<'_>, Pointer<'_>)];
+        let mut arena: Arena<Root> = Arena::new(|mc| {
+            let top = app!(mc, :Mul, @(:Add, #40, #2), #10);
+            (State::new(top, Default::default()), top)
+        }); // tip points to ((* ((+ 40) 2)) 10)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (* ((+ 40) 2))
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to *
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce *, tip points to ((+ 40) 2)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (+ 40)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to +
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce +, tip points to 42
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to result 420
+        arena.mutate(|_, (st, top)| {
+            assert_eq!(st.tip, *top, "tip is back at top");
+            assert_eq!(
+                top.unpack(),
+                Value::Integer(Integer::from(420)),
+                "top was modified in place, to value of 420",
+            );
+        });
     }
 
     #[test]
