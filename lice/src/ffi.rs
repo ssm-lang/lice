@@ -1,7 +1,7 @@
 // for each function, we need to know:
 // - how many args (arity); all need to be evaluated strictly
 // - types of args and return value; also includes ffi types
-use crate::{memory::Value, string::VString};
+use crate::{integer::Integer, memory::Value, string::VString};
 use core::{ptr::null, str::FromStr};
 use gc_arena::{Collect, Mutation};
 use lice_macros::Reduce;
@@ -20,6 +20,22 @@ unsafe impl Collect for ForeignPtr {
 impl ForeignPtr {
     pub fn null() -> Self {
         Self::from(null::<()>())
+    }
+
+    pub fn as_ptr(self) -> *mut u8 {
+        self.0 as *mut u8
+    }
+
+    pub fn peq(self, rhs: Self) -> bool {
+        self.eq(&rhs)
+    }
+
+    pub fn padd(self, rhs: Integer) -> Self {
+        self.as_ptr().wrapping_offset(rhs.signed()).into()
+    }
+
+    pub fn psub(self, rhs: Self) -> Integer {
+        unsafe { self.as_ptr().offset_from(rhs.as_ptr()) }.into()
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     combinator::{Combinator, Reduce, ReduxCode},
-    ffi::{self, FfiSymbol},
+    ffi::{self, FfiSymbol, ForeignPtr},
     float::Float,
     integer::Integer,
     memory::{App, Pointer, Value},
@@ -530,7 +530,12 @@ impl<'gc> State<'gc> {
             Combinator::FGt => self.handle_binop(mc, comb, false, Float::fgt),
             Combinator::FGe => self.handle_binop(mc, comb, false, Float::fge),
             Combinator::IToF => self.handle_unop(mc, comb, false, Float::from_integer),
-            Combinator::FShow => todo!("{comb:?}"),
+            Combinator::FShow => {
+                let top = self.pop_spine();
+                let s = top.unpack_arg().unpack().unwrap_float().fshow(mc);
+                top.set(mc, Value::Ref(s));
+                s
+            }
             Combinator::FRead => todo!("{comb:?}"),
 
             Combinator::PNull => {
@@ -538,9 +543,9 @@ impl<'gc> State<'gc> {
             }
             Combinator::ToPtr => todo!("{comb:?}"),
             Combinator::PCast => self.handle_unop(mc, comb, false, |i: Value<'_>| i),
-            Combinator::PEq => todo!("{comb:?}"),
-            Combinator::PAdd => todo!("{comb:?}"),
-            Combinator::PSub => todo!("{comb:?}"),
+            Combinator::PEq => self.handle_binop(mc, comb, false, ForeignPtr::peq),
+            Combinator::PAdd => self.handle_binop(mc, comb, false, ForeignPtr::padd),
+            Combinator::PSub => self.handle_binop(mc, comb, false, ForeignPtr::psub),
 
             Combinator::Return => {
                 let arg = self.pop_arg();

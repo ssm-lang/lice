@@ -1,6 +1,6 @@
-use crate::integer::Integer;
+use crate::{integer::Integer, string::hstring_from_utf8, memory::Pointer};
 use core::{fmt::Display, ops::*};
-use gc_arena::Collect;
+use gc_arena::{Collect, Mutation};
 
 #[cfg(target_pointer_width = "32")]
 type FloatInner = f32;
@@ -71,5 +71,10 @@ impl Float {
 
     pub fn from_integer(integer: Integer) -> Self {
         Self(integer.signed() as FloatInner)
+    }
+
+    pub fn fshow<'gc>(self, mc: &Mutation<'gc>) -> Pointer<'gc> {
+        let mut buf = ryu::Buffer::new();
+        hstring_from_utf8(mc, buf.format(self.inner()))
     }
 }
