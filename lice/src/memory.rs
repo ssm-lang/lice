@@ -9,6 +9,7 @@ use core::fmt::Debug;
 use core::{cell::Cell, ops};
 use derive_more::{From, TryInto, Unwrap};
 use gc_arena::{barrier::Unlock, lock::Lock, static_collect, Collect, Gc, Mutation};
+use log::debug;
 
 /// A node in the combinator graph.
 ///
@@ -42,7 +43,7 @@ impl<'gc> Debug for App<'gc> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("App")
             .field("fun", &Gc::as_ptr(self.fun.ptr))
-            .field("arg", &Gc::as_ptr(self.fun.ptr))
+            .field("arg", &Gc::as_ptr(self.arg.ptr))
             .finish()
     }
 }
@@ -115,6 +116,20 @@ impl<'gc> From<()> for Value<'gc> {
     }
 }
 
+pub(crate) fn make_pair<'gc>(
+    mc: &Mutation<'gc>,
+    (x, y): (Pointer<'gc>, Pointer<'gc>),
+) -> Pointer<'gc> {
+    let pair = Pointer::new(mc, Value::Combinator(Combinator::PAIR));
+    Pointer::new(
+        mc,
+        Value::App(App {
+            fun: Pointer::new(mc, Value::App(App { fun: pair, arg: x })),
+            arg: y,
+        }),
+    )
+}
+
 /// A reference to a [`Node`].
 ///
 /// Because `Pointer`s need to be packed into the [`Node`] union, their size must be the same size
@@ -145,8 +160,14 @@ impl<'gc> Debug for Pointer<'gc> {
 }
 
 impl<'gc> Pointer<'gc> {
+    #[track_caller]
     pub fn new(mc: &Mutation<'gc>, value: Value<'gc>) -> Self {
-        Gc::new(mc, Node::from(value)).into()
+        let ptr = Gc::new(mc, Node::from(value)).into();
+        debug!(
+            "      {}: constructed pointer: {ptr:?}",
+            std::panic::Location::caller()
+        );
+        ptr
     }
 
     pub fn set(&self, mc: &Mutation<'gc>, value: Value<'gc>) {

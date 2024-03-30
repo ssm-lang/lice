@@ -138,6 +138,11 @@ pub enum FfiSymbol {
     tmpname,
     #[reduce(from = "!path_str", returns = "int")]
     unlink,
+
+    #[reduce(from = "!int", returns = "ptr")]
+    malloc,
+    #[reduce(from = "!ptr", returns = "unit")]
+    free,
 }
 
 impl FfiSymbol {

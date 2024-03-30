@@ -1,11 +1,11 @@
-#![allow(dead_code)]
 use crate::{
     combinator::{Combinator, Reduce, ReduxCode},
     ffi::{self, FfiSymbol},
     float::Float,
     integer::Integer,
     memory::{App, Pointer, Value},
-    tick::TickTable,
+    string::{build_castring, eval_castring, hstring_from_utf8, peek_castring, peek_castringlen},
+    tick::{Tick, TickTable},
 };
 use bitvec::prelude::*;
 use core::{
@@ -39,10 +39,6 @@ struct Spine<'gc> {
 }
 
 impl<'gc> Spine<'gc> {
-    fn new() -> Self {
-        Self::default()
-    }
-
     fn push(&mut self, app: Pointer<'gc>) {
         self.stack.push(app);
     }
@@ -119,7 +115,6 @@ impl StrictWork {
     fn advance<'gc>(&mut self, spine: &Spine<'gc>) -> Option<Pointer<'gc>> {
         // No need to iterate over index 0 because it should never have been set.
         for idx in 1..Self::MAX_ARGS {
-            debug!("advance {:?}: checking arg {idx}", self.strict);
             if self.args[idx] {
                 self.args.set(idx, false);
 
@@ -129,11 +124,6 @@ impl StrictWork {
                         self.strict
                     )
                 };
-                debug!(
-                    "advance {:?}: checking arg: {:?}",
-                    self.strict,
-                    app.unpack_arg()
-                );
                 let app = app.follow();
                 let arg = app.unpack_arg().follow();
                 if !arg.unpack().whnf() {
@@ -143,11 +133,6 @@ impl StrictWork {
             }
         }
         None
-    }
-
-    /// All operations are complete, i.e., nothing is pending.
-    fn complete(&self) -> bool {
-        self.args.iter().all(|pending| !pending)
     }
 }
 
@@ -196,11 +181,35 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[inline]
+    #[track_caller]
+    fn pop_spine(&mut self) -> Pointer<'gc> {
+        self.spine.pop().unwrap_or_else(|| {
+            runtime_crash!("{}: could not pop spine", core::panic::Location::caller())
+        })
+    }
+
+    #[inline]
+    #[track_caller]
+    fn pop_arg(&mut self) -> Pointer<'gc> {
+        let app = self.spine.pop().unwrap_or_else(|| {
+            runtime_crash!("{}: could not pop spine", core::panic::Location::caller())
+        });
+        let Value::App(App { fun: _, arg }) = app.unpack() else {
+            runtime_crash!(
+                "{}: while popping spine, expected app node, but got {app:?}",
+                core::panic::Location::caller()
+            )
+        };
+        arg
+    }
+
     /// Symbolic handler for combinators with well-defined "redux code".
     ///
     /// With luck, the `rustc` optimizer will unroll this stack machine interpreter into efficient
     /// code, such that the `args` are kept in registers, and the `stk` is completely gone.
     #[inline(always)]
+    #[track_caller]
     fn do_redux(&mut self, mc: &Mutation<'gc>, comb: Combinator) -> Pointer<'gc> {
         #[cfg(debug_assertions)]
         macro_rules! unwrap {
@@ -221,10 +230,9 @@ impl<'gc> State<'gc> {
         let mut args = heapless::Vec::<_, 8>::new();
         let mut stk = heapless::Vec::<_, 8>::new();
 
-        for i in 0..comb.arity() {
-            let Some(app) = self.spine.pop() else {
-                runtime_crash!("Could not pop arg {i} for combinator {comb}")
-            };
+        for _ in 0..comb.arity() {
+            // TODO: better debug
+            let app = self.pop_spine();
             unwrap!(args.push(app.unpack_arg()));
             top = app;
         }
@@ -259,13 +267,26 @@ impl<'gc> State<'gc> {
         }
     }
 
-    fn start_strict(&mut self, strict: Strict) -> Option<Pointer<'gc>> {
-        let (work, first) = StrictWork::init(strict, &self.spine)?;
-        self.strict_context.push(work);
-        Some(first)
+    fn start_strict(&mut self, strict: Strict, mc: &Mutation<'gc>) -> Pointer<'gc> {
+        if let Some((work, first)) = StrictWork::init(strict, &self.spine) {
+            // `next` has been reduced to a combinator, though one or more of its arguments
+            // may still need to be evaluated before it can be handled
+            self.strict_context.push(work);
+            first
+        } else {
+            // If start_strict returns None, then we can directly handle the combinator
+            match strict {
+                Strict::Combinator(comb) => self.handle_comb(comb, mc),
+                Strict::Ffi(ffi) => self.handle_ffi(ffi, mc),
+            }
+        }
     }
 
-    fn resume_strict(&mut self) -> Result<Pointer<'gc>, Strict> {
+    fn resume_strict(&mut self, mc: &Mutation<'gc>) -> Pointer<'gc> {
+        // `tip` has been reduced to a value, probably because some strict operator had
+        // previously demanded strict arguments. We check our strict continuation context
+        // to see if we still need to evaluate more arguments, or if we can now handle the
+        // strict operator.
         let Some(work) = self.strict_context.last_mut() else {
             runtime_crash!("No pending strict operation");
         };
@@ -275,24 +296,24 @@ impl<'gc> State<'gc> {
                 "Resuming evaluation of strict {:?}, advanced to next argument",
                 work.strict
             );
-            Ok(next)
+            next
         } else {
             debug!(
                 "Resuming evaluation of strict {:?}, all arguments in WHNF",
                 work.strict
             );
-            let comb = work.strict;
+            let strict = work.strict;
             self.strict_context.pop();
-            Err(comb)
+            match strict {
+                Strict::Combinator(comb) => self.handle_comb(comb, mc),
+                Strict::Ffi(ffi) => self.handle_ffi(ffi, mc),
+            }
         }
     }
 
     fn start_io(&mut self, mc: &Mutation<'gc>, io: IO) -> Pointer<'gc> {
-        let Some(app) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 0 while setting up IO {io}")
-        };
-
-        let mut next = app.unpack_arg();
+        let top = self.pop_spine();
+        let mut next = top.unpack_arg();
 
         // Prepare spine for continuation
         match io {
@@ -319,8 +340,8 @@ impl<'gc> State<'gc> {
                 self.spine.push(continuation);
             }
             IO::Perform => {
-                // Push the app node back onto the spine. We will overwrite it later.
-                self.spine.push(app);
+                // Push the top app node back onto the spine. We will overwrite it later.
+                self.spine.push(top);
             }
         }
 
@@ -335,18 +356,22 @@ impl<'gc> State<'gc> {
             // runtime_crash!("No pending strict operation");
         };
 
-        let Some(continuation) = self.spine.pop() else {
-            runtime_crash!("Could not pop continuation from spine while resuming {io}")
-        };
+        let continuation = self.pop_spine();
         match io {
-            IO::Bind { .. } => Pointer::new(
-                mc,
-                // Apply the monadic value to the continuation, and return that
-                Value::App(App {
-                    fun: continuation,
-                    arg: value,
-                }),
-            ),
+            IO::Bind { .. } => {
+                let p = Pointer::new(
+                    mc,
+                    // Apply the monadic value to the continuation, and return that
+                    Value::App(App {
+                        fun: continuation,
+                        arg: value,
+                    }),
+                );
+                debug!("    >>= {continuation:?}");
+                debug!("    ... {value:?}");
+                debug!("     =  made {p:?}");
+                p
+            }
 
             IO::Then => continuation, // Ignore the monadic value, return the continuation
             IO::Perform => {
@@ -356,46 +381,6 @@ impl<'gc> State<'gc> {
                 value // Return the "unwrapped" monadic value
             }
         }
-    }
-
-    fn handle_from_utf8(&mut self, mc: &Mutation<'gc>) -> Pointer<'gc> {
-        let c = Combinator::FromUtf8;
-        let Some(top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 0 while performing {c}",)
-        };
-        let arg = top.unpack_arg();
-        let Value::String(arg) = arg.unpack() else {
-            runtime_crash!("{c} expected arg to be string, instead got {arg:?}",)
-        };
-
-        let arg: &str = arg.as_ref();
-
-        // TODO: don't allocate new combinators
-        let mut res = Pointer::new(mc, Value::Combinator(Combinator::NIL));
-        if arg.is_empty() {
-            return res;
-        }
-        let cons = Pointer::new(mc, Value::Combinator(Combinator::CONS));
-
-        for c in arg.chars().rev() {
-            let data = Pointer::new(mc, Value::Integer(Integer::from(c)));
-            let data = Pointer::new(
-                mc,
-                Value::App(App {
-                    fun: cons,
-                    arg: data,
-                }),
-            );
-            res = Pointer::new(
-                mc,
-                Value::App(App {
-                    fun: data,
-                    arg: res,
-                }),
-            );
-        }
-
-        res
     }
 
     fn handle_unop<Q, R>(
@@ -411,9 +396,7 @@ impl<'gc> State<'gc> {
         R: Into<Value<'gc>>,
     {
         debug!("handling unop {op}");
-        let Some(mut top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
-        };
+        let mut top = self.pop_spine();
         top.forward(mc);
         debug!("    arg 1: {:?}", top.unpack_arg());
         let arg1 = top.unpack_arg().follow().unpack().try_into().unwrap();
@@ -444,15 +427,12 @@ impl<'gc> State<'gc> {
         R: Into<Value<'gc>>,
     {
         debug!("handling binop {op}");
-        let Some(mut top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 0 while evaluating operator {op}")
-        };
+        let mut top = self.pop_spine();
         top.forward(mc);
         debug!("    arg 1: {:?}", top.unpack_arg());
         let arg1 = top.unpack_arg().follow().unpack().try_into().unwrap();
-        let Some(mut top) = self.spine.pop() else {
-            runtime_crash!("Could not pop arg 1 while evaluating operator {op}")
-        };
+
+        let mut top = self.pop_spine();
         top.forward(mc);
         debug!("    arg 2: {:?}", top.unpack_arg());
         let arg2 = top.unpack_arg().follow().unpack().try_into().unwrap();
@@ -557,17 +537,14 @@ impl<'gc> State<'gc> {
                 unreachable!("0-arity combinator {comb} should not exist at runtime")
             }
             Combinator::ToPtr => todo!("{comb:?}"),
-            Combinator::PCast => self.handle_unop(mc, comb, false, |i: Integer| i),
+            Combinator::PCast => self.handle_unop(mc, comb, false, |i: Value<'_>| i),
             Combinator::PEq => todo!("{comb:?}"),
             Combinator::PAdd => todo!("{comb:?}"),
             Combinator::PSub => todo!("{comb:?}"),
 
             Combinator::Return => {
-                let Some(top) = self.spine.pop() else {
-                    runtime_crash!("Could not pop arg 0 while evaluating operator {comb}")
-                };
-                let value = top.unpack_arg();
-                self.resume_io(mc, value)
+                let arg = self.pop_arg();
+                self.resume_io(mc, arg)
             }
             Combinator::Bind => self.start_io(mc, IO::Bind { cc: false }),
             Combinator::CCBind => self.start_io(mc, IO::Bind { cc: true }),
@@ -593,10 +570,24 @@ impl<'gc> State<'gc> {
             Combinator::ArrWrite => todo!("{comb:?}"),
             Combinator::ArrEq => todo!("{comb:?}"),
 
-            Combinator::FromUtf8 => self.handle_from_utf8(mc),
-            Combinator::CStringNew => todo!("{comb:?}"),
-            Combinator::CStringPeek => todo!("{comb:?}"),
-            Combinator::CStringPeekLen => todo!("{comb:?}"),
+            Combinator::FromUtf8 => {
+                let top = self.pop_spine();
+                let s = top.unpack_arg().unpack().unwrap_string();
+                let res = hstring_from_utf8(mc, s.as_ref());
+                top.set(mc, Value::Ref(res));
+                res
+            }
+            Combinator::CAStringLenNew => eval_castring(mc, self.pop_spine()),
+            Combinator::CAStringLenBuild => {
+                let s = self.pop_arg();
+                self.resume_io(mc, build_castring(mc, s))
+            }
+            Combinator::CAStringPeek => peek_castring(mc, self.pop_arg()),
+            Combinator::CAStringPeekLen => {
+                let s = self.pop_arg();
+                let l = self.pop_arg();
+                self.resume_io(mc, peek_castringlen(mc, s, l))
+            }
         }
     }
 
@@ -633,7 +624,20 @@ impl<'gc> State<'gc> {
             FfiSymbol::system => self.handle_unop(mc, ffi, true, ffi!(libc::system:(_))),
             FfiSymbol::tmpname => todo!("{ffi:?}"),
             FfiSymbol::unlink => self.handle_unop(mc, ffi, true, ffi!(libc::unlink:(_))),
+            FfiSymbol::malloc => self.handle_unop(mc, ffi, true, ffi!(libc::malloc:(_))),
+            FfiSymbol::free => self.handle_unop(mc, ffi, true, ffi!(libc::free:(_))),
         }
+    }
+
+    fn handle_tick(&mut self, t: Tick) -> Pointer<'gc> {
+        self.tick_table.tick(t);
+        let Some(next) = self.spine.pop() else {
+            runtime_crash!(
+                "Could not pop arg while evaluating tick {}",
+                self.tick_table.info(t).name
+            )
+        };
+        next.unpack_arg()
     }
 
     fn step(&mut self, mc: &Mutation<'gc>) {
@@ -651,35 +655,12 @@ impl<'gc> State<'gc> {
                 self.spine.push(cur);
                 fun
             }
-            Value::Combinator(comb) => self
-                // `next` has been reduced to a combinator, though one or more of its arguments
-                // may still need to be evaluated before it can be handled
-                .start_strict(Strict::Combinator(comb))
-                // If start_strict returns None, then we can directly handle the combinator
-                .unwrap_or_else(|| self.handle_comb(comb, mc)),
-            Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::ForeignPtr(_) => self
-                // `next` has been reduced to a value, probably because some strict operator had
-                // previously demanded strict arguments. We check our strict continuation context
-                // to see if we still need to evaluate more arguments, or if we can now handle the
-                // strict operator.
-                .resume_strict()
-                .unwrap_or_else(|strict| match strict {
-                    Strict::Combinator(comb) => self.handle_comb(comb, mc),
-                    Strict::Ffi(ffi) => self.handle_ffi(ffi, mc),
-                }),
-            Value::Tick(t) => {
-                self.tick_table.tick(t);
-                let Some(next) = self.spine.pop() else {
-                    runtime_crash!(
-                        "Could not pop arg while evaluating tick {}",
-                        self.tick_table.info(t).name
-                    )
-                };
-                next.unpack_arg()
+            Value::Combinator(comb) => self.start_strict(Strict::Combinator(comb), mc),
+            Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::ForeignPtr(_) => {
+                self.resume_strict(mc)
             }
-            Value::Ffi(ffi) => self
-                .start_strict(Strict::Ffi(ffi))
-                .unwrap_or_else(|| self.handle_ffi(ffi, mc)),
+            Value::Tick(t) => self.handle_tick(t),
+            Value::Ffi(ffi) => self.start_strict(Strict::Ffi(ffi), mc),
             Value::BadDyn(sym) => panic!("missing FFI symbol: {}", sym.name()),
         };
 

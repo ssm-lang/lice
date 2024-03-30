@@ -445,28 +445,33 @@ pub enum Combinator {
     #[reduce(from = "!cstr")]
     FromUtf8,
 
-    /// Construct a C string from a Haskell string, returning its length.
+    /// Construct a C ASCII string from a Haskell string.
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("newCAStringLen")]
-    #[reduce(from = "!hstr")]
-    CStringNew,
-    /// Read a Haskell string from a C string.
+    #[reduce(from = "hstr")]
+    CAStringLenNew,
+    /// Construct a C ASCII string from a Haskell string.
+    ///
+    /// Unlike CAStringLenBuild, this assumes that its argument is a fully-evaluated string.
+    #[reduce(from = "hstr")]
+    CAStringLenBuild,
+    /// Read a Haskell string from a C ASCII string.
     ///
     /// The encoding of the string depends on the encoding of the Haskell implementation.
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAString")]
     #[reduce(from = "!cstr")]
-    CStringPeek,
-    /// Read a Haskell string from a C string, up to the given length.
+    CAStringPeek,
+    /// Read a Haskell string from a C ASCII string, up to the given length.
     ///
     /// The encoding of the string depends on the encoding of the Haskell implementation.
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAStringLen")]
     #[reduce(from = "!cstr !max_len")]
-    CStringPeekLen,
+    CAStringPeekLen,
 }
 
 /// The runtime needs to know how core data structures are encoded: booleans, pairs, and lists.
@@ -485,7 +490,7 @@ impl Combinator {
     /// Scott-encoded list cons `(:)`.
     pub const CONS: Self = Self::O;
     /// Scott-encoded list nil `[]`.
-    pub const NIL: Self = Self::FALSE;
+    pub const NIL: Self = Self::K;
 }
 
 #[cfg(test)]
@@ -506,7 +511,7 @@ mod tests {
         (Combinator::Return, "IO.return"),
         (Combinator::StdOut, "IO.stdout"),
         (Combinator::PerformIO, "IO.performIO"),
-        (Combinator::CStringNew, "newCAStringLen"),
+        (Combinator::CAStringLenNew, "newCAStringLen"),
     ];
 
     #[test]
