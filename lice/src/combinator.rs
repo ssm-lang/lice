@@ -451,11 +451,6 @@ pub enum Combinator {
     #[display("newCAStringLen")]
     #[reduce(from = "hstr")]
     CAStringLenNew,
-    /// Construct a C ASCII string from a Haskell string.
-    ///
-    /// Unlike CAStringLenBuild, this assumes that its argument is a fully-evaluated string.
-    #[reduce(from = "hstr")]
-    CAStringLenBuild,
     /// Read a Haskell string from a C ASCII string.
     ///
     /// The encoding of the string depends on the encoding of the Haskell implementation.

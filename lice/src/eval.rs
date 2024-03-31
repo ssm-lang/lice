@@ -4,7 +4,7 @@ use crate::{
     float::Float,
     integer::Integer,
     memory::{App, Pointer, Value},
-    string::{build_castring, eval_castring, hstring_from_utf8, peek_castring, peek_castringlen},
+    string::{eval_hstring, hstring_from_utf8, new_castringlen, peek_castring, peek_castringlen},
     tick::{Tick, TickTable},
 };
 use bitvec::prelude::*;
@@ -582,10 +582,17 @@ impl<'gc> State<'gc> {
                 top.set(mc, Value::Ref(res));
                 res
             }
-            Combinator::CAStringLenNew => eval_castring(mc, self.pop_spine()),
-            Combinator::CAStringLenBuild => {
-                let s = self.pop_arg();
-                self.resume_io(mc, build_castring(mc, s))
+            Combinator::CAStringLenNew => {
+                let top = self.pop_spine();
+                let s = top.unpack_arg();
+                if let Some(cas) = new_castringlen(mc, s) {
+                    self.resume_io(mc, cas)
+                } else {
+                    let new = Pointer::new(mc, Value::Combinator(Combinator::CAStringLenNew));
+                    let again = Pointer::new(mc, Value::App(App { fun: new, arg: s }));
+                    top.set(mc, eval_hstring(mc, s, again));
+                    top
+                }
             }
             Combinator::CAStringPeek => peek_castring(mc, self.pop_arg()),
             Combinator::CAStringPeekLen => {
