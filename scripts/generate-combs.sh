@@ -35,9 +35,15 @@ compile() {
 mkdir -p ../combs
 
 for test in tests/*.hs ; do
-  hs="${test#*/}"
+  hs="${test##*/}"
   module="${hs%.hs}"
   compile "$module" tests
+done
+
+for program in ../hs/*.hs ; do
+  hs="${program##*/}"
+  module="${hs%.hs}"
+  compile "$module" ../hs
 done
 
 compile Example .
