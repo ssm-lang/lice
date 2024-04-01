@@ -39,12 +39,16 @@ impl TickTable {
     pub(crate) fn add_entry(&mut self, name: &str) -> Tick {
         self.find_entry(name).unwrap_or_else(|| {
             self.table.push(TickInfo::new(name));
-            Tick(self.table.len() - 1)
+            let index = self.table.len() - 1;
+            log::debug!("added tick: {} (index = {})", name, index);
+            Tick(index)
         })
     }
 
     pub(crate) fn tick(&mut self, tick: Tick) {
-        self.table[tick.0].count += 1;
+        let entry = &mut self.table[tick.0];
+        entry.count += 1;
+        log::info!("encountered tick: {} = {}", entry.name, entry.count);
     }
 
     pub(crate) fn info(&self, tick: Tick) -> &TickInfo {
