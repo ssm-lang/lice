@@ -11,6 +11,7 @@ for comb in combs/*.comb ; do
   test="${test%.comb}"
   result="$comb.result"
   ref="MicroHs/tests/$test.ref"
+  test_makefile="MicroHs/tests/Makefile"
 
   case "$test" in mhs) continue ;; esac # don't attempt to run mhs
 
@@ -21,6 +22,8 @@ for comb in combs/*.comb ; do
       grep "not yet implemented: " < "$result" | head -n 1
     elif grep -q "missing FFI symbol: " < "$result" ; then
       grep "missing FFI symbol: " < "$result" | head -n 1
+    elif grep -q "crash: " < "$result" ; then
+      grep "crash: " < "$result" | head -n 1
     else
       echo "(some other kind of error)"
     fi
@@ -29,12 +32,14 @@ for comb in combs/*.comb ; do
     # echo
   else
     if ! [ -f "$ref" ] ; then
-      echo -e "\033[1;32m[FINE]\033[0;32m\t(no reference output: $ref)"
+      echo -e "\033[1;34m[FINE]\033[0;34m\t(no reference output: $ref)"
       rm "$result"
+    elif ! grep -q "^\t\\\$(TMHS) $test" < "$test_makefile" ; then
+      echo -e "\033[1;34m[FINE]\033[0;34m\t(not tested, according to $test_makefile)"
     elif ! diff "$result" "$ref" >/dev/null ; then
       echo -e "\033[1;33m[MISMATCH]"
     else
-      echo -e "\033[1;32m[OK]"
+      echo -e "\033[1;32m[PASS]"
       rm "$result"
     fi
   fi

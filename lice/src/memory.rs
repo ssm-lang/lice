@@ -247,8 +247,8 @@ impl crate::file::Program {
                     Expr::Tick(name) => Value::Tick(tick_table.add_entry(name)),
                     Expr::Ffi(name) => FfiSymbol::lookup(name).map_or_else(
                         || {
-                            println!("Could not find {name}");
-                            Value::BadDyn(BadDyn::new(mc, name))
+                            log::warn!("Could not find {name}");
+                            BadDyn::new(mc, name).into()
                         },
                         Value::Ffi,
                     ),
