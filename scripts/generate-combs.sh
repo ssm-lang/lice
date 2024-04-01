@@ -9,6 +9,7 @@ MHS="bin/gmhs"
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
+# MicroHs does not seem to like being run from an external directory
 cd MicroHs || exit 1
 make "$MHS"
 
