@@ -5,7 +5,7 @@ use core::{
 };
 use gc_arena::Collect;
 
-#[derive(Debug, Clone, Copy, Collect, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Collect, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 #[collect(require_static)]
 pub struct Integer(usize);

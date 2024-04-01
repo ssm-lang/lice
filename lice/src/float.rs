@@ -1,4 +1,4 @@
-use crate::{integer::Integer, string::hstring_from_utf8, memory::Pointer};
+use crate::{integer::Integer, memory::Pointer, string::hstring_from_utf8};
 use core::{fmt::Display, ops::*};
 use gc_arena::{Collect, Mutation};
 

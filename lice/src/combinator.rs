@@ -486,6 +486,37 @@ impl Combinator {
     pub const CONS: Self = Self::O;
     /// Scott-encoded list nil `[]`.
     pub const NIL: Self = Self::K;
+
+    /// Scott-encoded `Ordering` constant, returned by `compare`.
+    ///
+    /// TODO: this should not allocate new combinators each time.
+    #[cfg(feature = "rt")]
+    pub fn from_ordering<'gc>(
+        mc: &gc_arena::Mutation<'gc>,
+        o: core::cmp::Ordering,
+    ) -> crate::memory::Pointer<'gc> {
+        use crate::memory::App;
+        use crate::memory::Pointer;
+        use core::cmp::Ordering;
+        match o {
+            Ordering::Less => {
+                let z = Pointer::new(mc, Self::Z.into());
+                let b = Pointer::new(mc, Self::B.into());
+                Pointer::new(mc, App { fun: z, arg: b }.into())
+            }
+            Ordering::Equal => {
+                // Encoded as K K
+                let k = Pointer::new(mc, Self::K.into());
+                Pointer::new(mc, App { fun: k, arg: k }.into())
+            }
+            Ordering::Greater => {
+                // Encoded as K A
+                let k = Pointer::new(mc, Self::K.into());
+                let a = Pointer::new(mc, Self::A.into());
+                Pointer::new(mc, App { fun: k, arg: a }.into())
+            }
+        }
+    }
 }
 
 #[cfg(test)]

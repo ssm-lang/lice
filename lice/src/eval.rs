@@ -482,7 +482,14 @@ impl<'gc> State<'gc> {
             Combinator::StrEqual => todo!("{comb:?}"),
             Combinator::Compare => todo!("{comb:?}"),
             Combinator::StrCmp => todo!("{comb:?}"),
-            Combinator::IntCmp => todo!("{comb:?}"),
+            Combinator::IntCmp => {
+                let x = self.pop_arg().unpack().unwrap_integer();
+                let top = self.pop_spine();
+                let y = top.unpack_arg().unpack().unwrap_integer();
+                let res = Combinator::from_ordering(mc, x.cmp(&y));
+                top.set(mc, Value::Ref(res));
+                top
+            }
             Combinator::ToInt => todo!("{comb:?}"),
             Combinator::ToFloat => todo!("{comb:?}"),
 
