@@ -1,5 +1,3 @@
-use gc_arena::Collect;
-
 #[derive(Debug, Default, Clone)]
 pub struct TickInfo {
     pub name: String,
@@ -15,7 +13,7 @@ impl TickInfo {
     }
 }
 
-#[derive(Debug, Default, Clone, Collect)]
+#[derive(Debug, Default, Clone, gc_arena::Collect)]
 #[collect(require_static)]
 pub struct TickTable {
     table: Vec<TickInfo>,
@@ -56,6 +54,6 @@ impl TickTable {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Collect)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, gc_arena::Collect)]
 #[collect(require_static)]
 pub struct Tick(usize);
