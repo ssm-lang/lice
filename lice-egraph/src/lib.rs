@@ -1,22 +1,22 @@
-use std::collections::HashMap;
-
+use std::collections::{HashMap, HashSet};
 use egg::*;
 use ordered_float::OrderedFloat;
 use lice::combinator::Combinator;
 use lice::file::{Expr, Index, Program};
 
 define_language! {
-    enum SKI {
+    pub enum SKI {
         Prim(Combinator),
         "@" = App([Id; 2]),
-        Float(OrderedFloat<f64>),
         Int(i64),
+        Float(OrderedFloat<f64>),
         Array(usize, Vec<Id>),
         Ref(usize),
         String(String),
         Tick(String),
         Ffi(String),
         Unknown(String),
+        Placeholder(usize),
     }
 }
 
@@ -43,16 +43,40 @@ fn ski_reductions() -> Vec<Rewrite<SKI, ()>> {
     ]
 }
 
-fn program_to_egraph(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<SKI, ()>) {
+pub fn program_to_egraph(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<SKI, ()>) {
     let mut egraph = EGraph::<SKI, ()>::default();
     let mut idx_eid_map = HashMap::<Index, Id>::new();
-    let root = construct_egraph(program, &mut idx_eid_map, &mut egraph, program.root);
+    let mut refs = HashSet::<Id>::new();
+    let root = construct_egraph(program, &mut idx_eid_map, &mut refs, &mut egraph, program.root);
     (root, idx_eid_map, egraph)
+}
+
+pub fn optimize(egraph: EGraph<SKI, ()>, root: Id) -> String {
+    let runner = Runner::<SKI, ()>::default()
+        .with_egraph(egraph)
+        .run(&ski_reductions());
+
+    let extractor = Extractor::new(&runner.egraph, AstSize);
+    let (_, best) = extractor.find_best(root);
+    
+    best.to_string()
+}
+
+pub fn noop(egraph: EGraph<SKI, ()>, root: Id) -> String {
+    let runner = Runner::<SKI, ()>::default()
+        .with_egraph(egraph)
+        .run(&vec![]);
+
+    let extractor = Extractor::new(&runner.egraph, AstSize);
+    let (_, best) = extractor.find_best(root);
+    
+    best.to_string()
 }
 
 fn construct_egraph(
     program: &Program,
     idx_eid_map: &mut HashMap<Index, Id>,
+    refs: &mut HashSet<Id>,
     egraph: &mut EGraph<SKI, ()>,
     idx: Index,
 ) -> Id {
@@ -60,11 +84,11 @@ fn construct_egraph(
         Expr::App(f, a) => {
             let func_eid = match idx_eid_map.get(f) {
                 Some(eid) => *eid,
-                None => construct_egraph(program, idx_eid_map, egraph, *f),
+                None => construct_egraph(program, idx_eid_map, refs, egraph, *f),
             };
             let arg_eid = match idx_eid_map.get(a) {
                 Some(eid) => *eid,
-                None => construct_egraph(program, idx_eid_map, egraph, *a),
+                None => construct_egraph(program, idx_eid_map, refs, egraph, *a),
             };
             let app_eid = egraph.add(SKI::App([func_eid, arg_eid]));
             idx_eid_map.insert(idx, app_eid);
@@ -80,9 +104,66 @@ fn construct_egraph(
             idx_eid_map.insert(idx, int_eid);
             int_eid
         }
-        
-        _ => todo!("add more exprs"),
+        Expr::Float(flt) => {
+            let float_eid = egraph.add(SKI::Float(OrderedFloat(*flt)));
+            idx_eid_map.insert(idx, float_eid);
+            float_eid
+        }
+        Expr::Array(u, arr) => {
+            let e_arr: Vec<Id> = arr.iter().map(|idx| { 
+                let elmt_eid = match idx_eid_map.get(idx) {
+                    Some(eid) => *eid,
+                    None => construct_egraph(program, idx_eid_map, refs, egraph, *idx),
+                };
+                elmt_eid
+            }).collect();
+            let arr_eid = egraph.add(SKI::Array(*u, e_arr));
+            idx_eid_map.insert(idx, arr_eid);
+            arr_eid
+        }
+        Expr::Ref(lbl) => {
+            let def_idx = &program.defs[*lbl]; // index of referenced expr in program body
+            let ref_obj_eid = match idx_eid_map.get(def_idx) {
+                Some(eid) => *eid, // ref'ed expr is already in egraph
+                None => egraph.add(SKI::Placeholder(*def_idx)), // construct_egraph(program, idx_eid_map, egraph, *def_idx),
+            };
+            let ref_eid = egraph.add(SKI::Ref(usize::from(ref_obj_eid)));
+            refs.insert(ref_eid);
+            // egraph.union(ref_eid, ref_obj_eid);
+            idx_eid_map.insert(idx, ref_eid);
+            ref_eid
+        }
+        Expr::String(s) => {
+            let str_eid = egraph.add(SKI::String(s.to_string()));
+            idx_eid_map.insert(idx, str_eid);
+            str_eid
+        }
+        Expr::Tick(s) => {
+            let tick_eid = egraph.add(SKI::Tick(s.to_string()));
+            idx_eid_map.insert(idx, tick_eid);
+            tick_eid
+        }
+        Expr::Ffi(s) => {
+            let ffi_eid = egraph.add(SKI::Ffi(s.to_string()));
+            idx_eid_map.insert(idx, ffi_eid);
+            ffi_eid
+        }
+        _ => todo!("Unknown lice Expr"),
     }
+}
+
+fn resolve_refs(
+    program: &Program,
+    idx_eid_map: &HashMap<Index, Id>,
+    egraph: &mut EGraph<SKI, ()>
+) {
+    let ref_exprs: Vec<&Expr> = program.body.iter().filter(|exp| {
+        match exp {
+            Expr::Ref(_) => true,
+            _ => false,
+        }
+    }).collect();
+    
 }
 
 fn construct_program(
