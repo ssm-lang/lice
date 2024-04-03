@@ -55,7 +55,7 @@ pub(crate) struct FShow(pub(crate) Float);
 impl<'gc> IntoValue<'gc> for FShow {
     fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc> {
         let mut buf = ryu::Buffer::new();
-        hstring_from_utf8(mc, buf.format(self.0.inner()))
+        hstring_from_utf8(mc, buf.format(self.0.inner())).into()
     }
 }
 
@@ -87,10 +87,5 @@ impl Float {
 
     pub fn from_integer(integer: Integer) -> Self {
         Self(integer.signed() as FloatInner)
-    }
-
-    pub fn fshow<'gc>(self, mc: &Mutation<'gc>) -> Value<'gc> {
-        let mut buf = ryu::Buffer::new();
-        hstring_from_utf8(mc, buf.format(self.inner()))
     }
 }

@@ -33,6 +33,18 @@ fn runtime_crash(args: fmt::Arguments) -> ! {
     panic!("Runtime crash: {args}")
 }
 
+type Operator = Either<Combinator, FfiSymbol>;
+impl From<Combinator> for Operator {
+    fn from(value: Combinator) -> Self {
+        Either::Left(value)
+    }
+}
+impl From<FfiSymbol> for Operator {
+    fn from(value: FfiSymbol) -> Self {
+        Either::Right(value)
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SpineError {
     #[error("could not pop, spine empty")]
@@ -45,6 +57,8 @@ pub enum SpineError {
 #[collect(no_drop)]
 struct Spine<'gc> {
     stack: Vec<Pointer<'gc>>,
+    /// Invariant: at all times, `watermark <= stack.len()`.
+    watermark: usize,
 }
 
 impl<'gc> Spine<'gc> {
@@ -60,17 +74,22 @@ impl<'gc> Spine<'gc> {
         let idx = self.stack.len() - 1 - idx;
         self.stack.get(idx).cloned().ok_or(SpineError::NoPeek(idx))
     }
-}
 
-type Operator = Either<Combinator, FfiSymbol>;
-impl From<Combinator> for Operator {
-    fn from(value: Combinator) -> Self {
-        Either::Left(value)
+    #[allow(dead_code)]
+    fn has_args(&self, num: usize) -> bool {
+        self.watermark <= self.stack.len() - num
     }
-}
-impl From<FfiSymbol> for Operator {
-    fn from(value: FfiSymbol) -> Self {
-        Either::Right(value)
+
+    fn save(&mut self) -> usize {
+        let prev = self.watermark;
+        self.watermark = self.stack.len();
+        prev
+    }
+
+    fn restore(&mut self, prev: usize) {
+        debug_assert!(self.watermark <= self.stack.len());
+        self.stack.drain(self.watermark..);
+        self.watermark = prev;
     }
 }
 
@@ -80,12 +99,13 @@ impl From<FfiSymbol> for Operator {
 struct StrictWork {
     strict: Operator,
     args: BitArr!(for Self::MAX_ARGS),
+    watermark: usize,
 }
 
 impl StrictWork {
     const MAX_ARGS: usize = 4;
 
-    fn init<'gc>(op: Operator, spine: &Spine<'gc>) -> Option<(Self, Pointer<'gc>)> {
+    fn init<'gc>(op: Operator, spine: &mut Spine<'gc>) -> Option<(Self, Pointer<'gc>)> {
         // Figure out which args need to be evaluated, i.e., are not yet WHNF
         // Default state: we don't need to evalute each arg
         let mut args = BitArray::new([0]);
@@ -110,13 +130,17 @@ impl StrictWork {
         }
         let first = *first.get()?; // If no args need to be evaluated, then return None
         Some((
-            Self { strict: op, args },
+            Self {
+                strict: op,
+                args,
+                watermark: spine.save(),
+            },
             spine.peek(first).unwrap().follow().unpack_arg().follow(),
         ))
     }
 
     /// Advance the pending arg state.
-    fn advance<'gc>(&mut self, spine: &Spine<'gc>) -> Option<Pointer<'gc>> {
+    fn advance<'gc>(&mut self, spine: &mut Spine<'gc>) -> Option<Pointer<'gc>> {
         // No need to iterate over index 0 because it should never have been set.
         for idx in 1..Self::MAX_ARGS {
             if self.args[idx] {
@@ -133,6 +157,7 @@ impl StrictWork {
                 }
             }
         }
+        spine.restore(self.watermark);
         None
     }
 }
@@ -204,7 +229,7 @@ impl<'gc> State<'gc> {
     /// code, such that the `args` are kept in registers, and the `stk` is completely gone.
     #[inline(always)]
     #[track_caller]
-    fn do_redux(&mut self, mc: &Mutation<'gc>, comb: Combinator) -> Pointer<'gc> {
+    fn do_redux(&mut self, mc: &Mutation<'gc>, comb: Combinator) -> Result<Pointer<'gc>, VMError> {
         #[cfg(debug_assertions)]
         macro_rules! unwrap {
             ($e:expr) => {
@@ -247,7 +272,7 @@ impl<'gc> State<'gc> {
         match code[code.len() - 1] {
             ReduxCode::Arg(i) => {
                 top.set(mc, Value::Ref(args[i]));
-                args[i]
+                Ok(args[i])
             }
             ReduxCode::Top => {
                 unreachable!("no rule should reduce to '^' alone ")
@@ -256,24 +281,24 @@ impl<'gc> State<'gc> {
                 let arg = unwrap!(stk.pop());
                 let fun = unwrap!(stk.pop());
                 top.set(mc, App { fun, arg });
-                top
+                Ok(top)
             }
         }
     }
 
-    fn start_strict(
-        &mut self,
-        strict: Operator,
-        mc: &Mutation<'gc>,
-    ) -> Result<Pointer<'gc>, VMError> {
-        if let Some((work, first)) = StrictWork::init(strict, &self.spine) {
+    fn start_strict(&mut self, op: Operator, mc: &Mutation<'gc>) -> Result<Pointer<'gc>, VMError> {
+        if !self.spine.has_args(for_both!(op, o => o.arity())) {
+            return self.resume_strict(mc);
+        }
+
+        if let Some((work, first)) = StrictWork::init(op, &mut self.spine) {
             // `next` has been reduced to a combinator, though one or more of its arguments
             // may still need to be evaluated before it can be handled
             self.strict_context.push(work);
             Ok(first)
         } else {
             // If start_strict returns None, then we can directly handle the combinator
-            match strict {
+            match op {
                 Either::Left(comb) => self.eval_comb(comb, mc),
                 Either::Right(ffi) => self.eval_ffi(ffi, mc),
             }
@@ -289,7 +314,7 @@ impl<'gc> State<'gc> {
             runtime_crash!("No pending strict operation");
         };
 
-        if let Some(next) = work.advance(&self.spine) {
+        if let Some(next) = work.advance(&mut self.spine) {
             debug!(
                 "Resuming evaluation of strict {:?}, advanced to next argument",
                 work.strict
@@ -362,7 +387,6 @@ impl<'gc> State<'gc> {
             IO::Bind { .. } => {
                 let p = Pointer::new(
                     mc,
-                    // Apply the monadic value to the continuation, and return that
                     App {
                         fun: continuation,
                         arg: value,
@@ -384,14 +408,14 @@ impl<'gc> State<'gc> {
         Ok(next)
     }
 
-    fn handle_unop<Q, R>(
+    fn handle_unop<P, R>(
         &mut self,
         mc: &Mutation<'gc>,
         op: impl Display + Reduce,
-        handler: impl FnOnce(Q) -> R,
+        handler: impl FnOnce(P) -> R,
     ) -> Result<Pointer<'gc>, VMError>
     where
-        Q: Copy + FromValue<'gc>,
+        P: Copy + FromValue<'gc>,
         R: IntoValue<'gc>,
     {
         debug!("handling unop {op}");
@@ -399,7 +423,7 @@ impl<'gc> State<'gc> {
         top.forward(mc);
         debug!("    arg 1: {:?}", top.unpack_arg());
         let arg1 = top.unpack_arg().follow().unpack();
-        let arg1 = Q::from_value(mc, arg1).expect("FIXME");
+        let arg1 = P::from_value(mc, arg1).expect("FIXME");
 
         let value = handler(arg1).into_value(mc);
         debug!("    returned: {value:?}");
@@ -470,9 +494,8 @@ impl<'gc> State<'gc> {
             | Combinator::K3
             | Combinator::K4
             | Combinator::CCB
-            | Combinator::Seq => Ok(self.do_redux(mc, comb)),
+            | Combinator::Seq => self.do_redux(mc, comb),
 
-            // Combinator::Seq => self.do_redux(mc, comb), // Seq has a trivial redux code
             Combinator::Rnf => unimplemented!("RNF not implemented"),
             Combinator::ErrorMsg => todo!("{comb:?}"),
             Combinator::NoDefault => todo!("{comb:?}"),
@@ -567,7 +590,16 @@ impl<'gc> State<'gc> {
             Combinator::ArrWrite => todo!("{comb:?}"),
             Combinator::ArrEq => todo!("{comb:?}"),
 
-            Combinator::FromUtf8 => self.handle_unop(mc, comb, Value::unwrap_string),
+            Combinator::FromUtf8 => {
+                let top = self.spine.pop().unwrap();
+                let s = top.unpack_arg().unpack().unwrap_string();
+                let res = crate::string::hstring_from_utf8(mc, s.as_ref());
+                let res = Pointer::new(mc, res);
+                top.set(mc, res);
+                Ok(res)
+                // TODO: make sure this is actually calling hstring_from_utf8
+                // self.handle_unop(mc, comb, Value::unwrap_string)
+            }
             Combinator::CAStringLenNew => {
                 let top = self.spine.pop().expect("FIXME");
                 let s = top.unpack_arg();

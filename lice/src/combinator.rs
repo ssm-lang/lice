@@ -441,8 +441,6 @@ pub enum Combinator {
     /** C strings **/
 
     /// Read a Haskell string from a UTF-8-encoded C string.
-    ///
-    /// TODO: Really ??? This doesn't seem right. How is this non-IO? Figure out what is going on.
     #[display("fromUTF8")]
     #[reduce(from = "!cstr")]
     FromUtf8,
