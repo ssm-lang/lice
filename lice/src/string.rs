@@ -203,7 +203,7 @@ pub(crate) fn new_castringlen<'gc>(mc: &Mutation<'gc>, s: Pointer<'gc>) -> Optio
 }
 
 pub(crate) fn peek_castring<'gc>(ptr: *const core::ffi::c_char) -> &'gc str {
-    &unsafe { CStr::from_ptr(ptr) }.to_str().unwrap()
+    unsafe { CStr::from_ptr(ptr) }.to_str().unwrap()
 }
 
 pub(crate) fn peek_castringlen<'gc>(ptr: *const core::ffi::c_char, len: usize) -> &'gc str {

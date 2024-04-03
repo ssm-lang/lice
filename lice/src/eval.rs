@@ -635,7 +635,7 @@ impl<'gc> State<'gc> {
             FfiSymbol::atan2 => self.handle_binop(mc, ffi, Float::fatan2),
             FfiSymbol::cos => self.handle_unop(mc, ffi, Float::fcos),
             FfiSymbol::exp => self.handle_unop(mc, ffi, Float::fexp),
-            FfiSymbol::log => self.handle_binop(mc, ffi, Float::flog),
+            FfiSymbol::log => self.handle_unop(mc, ffi, Float::flog),
             FfiSymbol::sin => self.handle_unop(mc, ffi, Float::fsin),
             FfiSymbol::sqrt => self.handle_unop(mc, ffi, Float::fsqrt),
             FfiSymbol::tan => self.handle_unop(mc, ffi, Float::ftan),
@@ -680,6 +680,7 @@ impl<'gc> State<'gc> {
                 unreachable!("indirections should already have been followed")
             }
             Value::App(App { fun, arg: _arg }) => {
+                debug!("Pushed {fun:?} to spine");
                 self.spine.push(cur);
                 Ok(fun)
             }

@@ -121,7 +121,7 @@ pub enum FfiSymbol {
     cos,
     #[reduce(from = "!float", to_io = "float")]
     exp,
-    #[reduce(from = "!float", to_io = "float")]
+    #[reduce(from = "!x:float", to_io = "float")]
     log,
     #[reduce(from = "!float", to_io = "float")]
     sin,

@@ -37,6 +37,7 @@ rt = [
   "dep:thiserror",
   "dep:either",
   "dep:strum",
+  "dep:libmath",
 ]
 
 [dependencies]
@@ -75,6 +76,7 @@ ryu             = { optional = true, version = "1.0" }
 thiserror       = { optional = true, version = "1.0" }
 either          = { optional = true, version = "1.10" }
 strum           = { optional = true, version = "0.26", features = ["derive"] }
+libmath         = { optional = true, version = "0.2" }
 
 [build-dependencies]
 bindgen = { version = "0.69" }

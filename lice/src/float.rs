@@ -54,8 +54,17 @@ macro_rules! op {
 pub(crate) struct FShow(pub(crate) Float);
 impl<'gc> IntoValue<'gc> for FShow {
     fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc> {
+        let mut value = self.0.inner();
         let mut buf = ryu::Buffer::new();
-        hstring_from_utf8(mc, buf.format(self.0.inner())).into()
+
+        // NOTE: an awful hack to round to 16-digit output, because MicroHs does so
+        let mut scale = 16;
+        while buf.format(value).len() > 16 && scale > 0 {
+            value = math::round::half_away_from_zero(value, scale);
+            scale -= 1;
+        }
+
+        hstring_from_utf8(mc, buf.format(value))
     }
 }
 
@@ -80,7 +89,7 @@ impl Float {
     op![fsize::atan2 as fatan2(self, rhs)];
     op![fsize::cos as fcos(self)];
     op![fsize::exp as fexp(self)];
-    op![fsize::log as flog(self, rhs)];
+    op![fsize::ln as flog(self)];
     op![fsize::sin as fsin(self)];
     op![fsize::sqrt as fsqrt(self)];
     op![fsize::tan as ftan(self)];
