@@ -1,5 +1,8 @@
 use clap::Parser;
-use lice::{eval::VM, file::CombFile};
+use lice::{
+    eval::{VMError, VM},
+    file::CombFile,
+};
 use log::{error, info};
 use std::{fs::File, io::Read, path::PathBuf, process};
 
@@ -34,7 +37,10 @@ fn main() {
     let mut i = 0;
     loop {
         info!("VM step {i}");
-        vm.step();
-        i += 1;
+        match vm.step() {
+            Ok(_) => i += 1,
+            Err(VMError::AlreadyDone) => break,
+            Err(e) => panic!("{e}"),
+        }
     }
 }

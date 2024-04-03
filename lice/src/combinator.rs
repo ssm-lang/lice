@@ -16,6 +16,8 @@ pub trait Reduce {
 
     fn redux(&self) -> Option<&'static [ReduxCode]>;
 
+    fn io_action(&self) -> bool;
+
     /// How many arguments are needed for reduction.
     #[inline]
     fn arity(&self) -> usize {
@@ -338,13 +340,13 @@ pub enum Combinator {
     ///
     /// Has type `Monad m => a -> m a`
     #[display("IO.return")]
-    #[reduce(from = "a")]
+    #[reduce(from = "a", to_io = "ma")]
     Return,
     /// Monadic bind in the IO monad.
     ///
     /// Has type `Monad m => m a -> (a -> m b) -> m b`.
     #[display("IO.>>=")]
-    #[reduce(from = "ma a_mb")]
+    #[reduce(from = "ma a_mb", to_io = "mb")]
     Bind,
     /// Kleisli-composition (?) in the IO monad.
     ///
@@ -361,31 +363,31 @@ pub enum Combinator {
     ///                     ===     r >>= (s >=> q)
     /// ```
     #[display("IO.C'BIND")]
-    #[reduce(from = "a_mb b_mc a")]
+    #[reduce(from = "a_mb b_mc a", to_io = "mc")]
     CCBind,
     /// Sequencing in the IO monad.
     ///
     /// Has type `Monad m => m a -> m b -> m b`.
     #[display("IO.>>")]
-    #[reduce(from = "ma mb")]
+    #[reduce(from = "ma mb", to_io = "mb")]
     Then,
     #[display("IO.performIO")]
-    #[reduce(from = "io_term")]
+    #[reduce(from = "ma", to_io = "a")]
     PerformIO,
     /// Execute a term, and catch any thrown exception.
     #[display("IO.catch")]
-    #[reduce(from = "!term handler")]
+    #[reduce(from = "!term handler", to_io = "term")]
     Catch,
     /// A dynamic FFI lookup from a Haskell string.
     #[display("dynsym")]
-    #[reduce(from = "!name")]
+    #[reduce(from = "!hstring", to_io = "TODO")]
     DynSym,
 
     #[display("IO.serialize")]
-    #[reduce(from = "!file_ptr term")]
+    #[reduce(from = "!BFILE* term", to_io = "TODO")]
     Serialize,
     #[display("IO.deserialize")]
-    #[reduce(from = "!file_ptr")]
+    #[reduce(from = "!BFILE*", to_io = "TODO")]
     Deserialize,
     /// A handle to standard input.
     #[display("IO.stdin")]
@@ -403,31 +405,31 @@ pub enum Combinator {
     ///
     /// FIXME: Apparently, the semantics are like `IO.serialize`, except without a header??
     #[display("IO.print")]
-    #[reduce(from = "!file_ptr !term")]
+    #[reduce(from = "!BFILE* !term", to_io = "unit")]
     Print,
     #[display("IO.getArgRef")]
-    #[reduce(constant)]
+    #[reduce(constant, to_io = "args")]
     GetArgRef,
     #[display("IO.getTimeMilli")]
-    #[reduce(from = "FIXME")] // TODO: how is this evaluated?
+    #[reduce(from = "FIXME", to_io = "TODO")]
     GetTimeMilli,
 
     /*** Arrays ***/
     /// Allocate an array of the specified size, all initialized to the given element.
     #[display("A.alloc")]
-    #[reduce(from = "!size elem")]
+    #[reduce(from = "!size elem", to_io = "array")]
     ArrAlloc,
     /// Get the size of an array.
     #[display("A.size")]
-    #[reduce(from = "!arr")]
+    #[reduce(from = "!arr", to_io = "size")]
     ArrSize,
     /// Read an element from an array.
     #[display("A.read")]
-    #[reduce(from = "!arr !idx")]
+    #[reduce(from = "!arr !idx", to_io = "T")]
     ArrRead,
     /// Write an element to an array.
     #[display("A.write")]
-    #[reduce(from = "!arr !idx elem")]
+    #[reduce(from = "!arr !idx elem", to_io = "unit")]
     ArrWrite,
     /// Array equality.
     ///
@@ -449,7 +451,7 @@ pub enum Combinator {
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("newCAStringLen")]
-    #[reduce(from = "hstr")]
+    #[reduce(from = "hstr", to_io = "pair_cstr_len")]
     CAStringLenNew,
     /// Read a Haskell string from a C ASCII string.
     ///
@@ -457,7 +459,7 @@ pub enum Combinator {
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAString")]
-    #[reduce(from = "!cstr")]
+    #[reduce(from = "!cstr", to_io = "hstring")]
     CAStringPeek,
     /// Read a Haskell string from a C ASCII string, up to the given length.
     ///
@@ -465,7 +467,7 @@ pub enum Combinator {
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAStringLen")]
-    #[reduce(from = "!cstr !max_len")]
+    #[reduce(from = "!cstr !max_len", to_io = "hstring")]
     CAStringPeekLen,
 }
 
@@ -486,36 +488,35 @@ impl Combinator {
     pub const CONS: Self = Self::O;
     /// Scott-encoded list nil `[]`.
     pub const NIL: Self = Self::K;
+}
 
-    /// Scott-encoded `Ordering` constant, returned by `compare`.
-    ///
-    /// TODO: this should not allocate new combinators each time.
-    #[cfg(feature = "rt")]
-    pub fn from_ordering<'gc>(
-        mc: &gc_arena::Mutation<'gc>,
-        o: core::cmp::Ordering,
-    ) -> crate::memory::Pointer<'gc> {
+/// Scott-encoded `Ordering` constants, returned by `compare`.
+#[cfg(feature = "rt")]
+impl<'gc> crate::memory::IntoValue<'gc> for core::cmp::Ordering {
+    fn into_value(self, mc: &gc_arena::Mutation<'gc>) -> crate::memory::Value<'gc> {
+        /// TODO: this should not allocate new combinators each time.
         use crate::memory::App;
         use crate::memory::Pointer;
         use core::cmp::Ordering;
-        match o {
+        match self {
             Ordering::Less => {
-                let z = Pointer::new(mc, Self::Z.into());
-                let b = Pointer::new(mc, Self::B.into());
-                Pointer::new(mc, App { fun: z, arg: b }.into())
+                let z = Pointer::new(mc, Combinator::Z);
+                let b = Pointer::new(mc, Combinator::B);
+                App { fun: z, arg: b }
             }
             Ordering::Equal => {
                 // Encoded as K K
-                let k = Pointer::new(mc, Self::K.into());
-                Pointer::new(mc, App { fun: k, arg: k }.into())
+                let k = Pointer::new(mc, Combinator::K);
+                App { fun: k, arg: k }
             }
             Ordering::Greater => {
                 // Encoded as K A
-                let k = Pointer::new(mc, Self::K.into());
-                let a = Pointer::new(mc, Self::A.into());
-                Pointer::new(mc, App { fun: k, arg: a }.into())
+                let k = Pointer::new(mc, Combinator::K);
+                let a = Pointer::new(mc, Combinator::A);
+                App { fun: k, arg: a }
             }
         }
+        .into()
     }
 }
 

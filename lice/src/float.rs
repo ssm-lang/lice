@@ -1,4 +1,8 @@
-use crate::{integer::Integer, memory::Pointer, string::hstring_from_utf8};
+use crate::{
+    integer::Integer,
+    memory::{FromValue, IntoValue, Value},
+    string::hstring_from_utf8,
+};
 use core::{fmt::Display, ops::*};
 use gc_arena::{Collect, Mutation};
 
@@ -25,6 +29,10 @@ impl Display for Float {
     }
 }
 
+impl<'gc> FromValue<'gc> for Float {
+    from_gc_value!(Float);
+}
+
 macro_rules! op {
     (fsize::$method:ident as $name:ident(self, $rhs:ident)) => {
         pub fn $name(self, $rhs: Self) -> Self {
@@ -41,6 +49,14 @@ macro_rules! op {
             self.inner().$method(&$rhs.inner()).into()
         }
     };
+}
+
+pub(crate) struct FShow(pub(crate) Float);
+impl<'gc> IntoValue<'gc> for FShow {
+    fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc> {
+        let mut buf = ryu::Buffer::new();
+        hstring_from_utf8(mc, buf.format(self.0.inner()))
+    }
 }
 
 impl Float {
@@ -73,7 +89,7 @@ impl Float {
         Self(integer.signed() as FloatInner)
     }
 
-    pub fn fshow<'gc>(self, mc: &Mutation<'gc>) -> Pointer<'gc> {
+    pub fn fshow<'gc>(self, mc: &Mutation<'gc>) -> Value<'gc> {
         let mut buf = ryu::Buffer::new();
         hstring_from_utf8(mc, buf.format(self.inner()))
     }

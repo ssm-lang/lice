@@ -7,7 +7,6 @@ use crate::tick::{Tick, TickTable};
 use crate::{combinator::Combinator, integer::Integer};
 use core::fmt::Debug;
 use core::{cell::Cell, ops};
-use derive_more::{From, TryInto, Unwrap};
 use gc_arena::{barrier::Unlock, lock::Lock, static_collect, Collect, Gc, Mutation};
 use log::debug;
 
@@ -49,7 +48,16 @@ impl<'gc> Debug for App<'gc> {
 }
 
 /// Inner contents of a node.
-#[derive(Debug, Clone, Copy, Collect, PartialEq, From, TryInto, Unwrap)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Collect,
+    PartialEq,
+    derive_more::From,
+    derive_more::Unwrap,
+    strum::IntoStaticStr,
+)]
 #[collect(no_drop)]
 pub enum Value<'gc> {
     App(App<'gc>),
@@ -66,6 +74,31 @@ pub enum Value<'gc> {
 
 // Combinators are just constant values.
 static_collect!(Combinator);
+macro_rules! from_gc_value {
+    ($variant:ident) => {
+        fn from_value(
+            _mc: &gc_arena::Mutation<'gc>,
+            value: crate::memory::Value<'gc>,
+        ) -> Result<Self, crate::memory::ConversionError> {
+            if let crate::memory::Value::$variant(v) = value {
+                Ok(v.into())
+            } else {
+                Err(crate::memory::ConversionError {
+                    expected: core::any::type_name::<Self>(),
+                    got: value.into(),
+                })
+            }
+        }
+    };
+}
+
+macro_rules! into_gc_value {
+    ($variant:ident) => {
+        fn into_value(self, _mc: &gc_arena::Mutation<'gc>) -> crate::memory::Value<'gc> {
+            crate::memory::Value::$variant(self.into())
+        }
+    };
+}
 
 impl<'gc> Value<'gc> {
     pub fn whnf(&self) -> bool {
@@ -161,17 +194,18 @@ impl<'gc> Debug for Pointer<'gc> {
 
 impl<'gc> Pointer<'gc> {
     #[track_caller]
-    pub fn new(mc: &Mutation<'gc>, value: Value<'gc>) -> Self {
-        let ptr = Gc::new(mc, Node::from(value)).into();
+    pub fn new<T: IntoValue<'gc>>(mc: &Mutation<'gc>, value: T) -> Self {
+        let ptr = Gc::new(mc, Node::from(value.into_value(mc))).into();
         debug!(
-            "      {}: constructed pointer: {ptr:?}",
-            std::panic::Location::caller()
+            "{}: Pointer::new({}) => {ptr:?}",
+            std::panic::Location::caller(),
+            core::any::type_name::<T>()
         );
         ptr
     }
 
-    pub fn set(&self, mc: &Mutation<'gc>, value: Value<'gc>) {
-        self.ptr.unlock(mc).set(value)
+    pub fn set<T: IntoValue<'gc>>(&self, mc: &Mutation<'gc>, value: T) {
+        self.ptr.unlock(mc).set(value.into_value(mc))
     }
 
     pub fn follow(&self) -> Self {
@@ -211,6 +245,36 @@ impl<'gc> From<Gc<'gc, Node<'gc>>> for Pointer<'gc> {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("could not perform conversion, expected {expected}, got {got}")]
+pub struct ConversionError {
+    pub expected: &'static str,
+    pub got: &'static str,
+}
+
+pub trait FromValue<'gc>: Sized {
+    fn from_value(mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Self, ConversionError>;
+}
+
+impl<'gc, T: From<Value<'gc>>> FromValue<'gc> for T {
+    fn from_value(_mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Self, ConversionError> {
+        Ok(value.into())
+    }
+}
+
+pub trait IntoValue<'gc> {
+    fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc>;
+}
+
+impl<'gc, T> IntoValue<'gc> for T
+where
+    Value<'gc>: From<T>,
+{
+    fn into_value(self, _mc: &Mutation<'gc>) -> Value<'gc> {
+        self.into()
+    }
+}
+
 #[cfg(feature = "file")]
 impl crate::file::Program {
     pub fn deserialize<'gc>(&self, mc: &Mutation<'gc>, tick_table: &mut TickTable) -> Pointer<'gc> {
@@ -236,9 +300,9 @@ impl crate::file::Program {
                     Expr::Ref(r) => Value::Ref(heap[self.defs[*r]]),
                     Expr::Prim(c) => match *c {
                         Combinator::PNull => ForeignPtr::null().into(),
-                        Combinator::StdIn => unsafe { ffi::bfile::mystdin() }.into(),
-                        Combinator::StdOut => unsafe { ffi::bfile::mystdout() }.into(),
-                        Combinator::StdErr => unsafe { ffi::bfile::mystderr() }.into(),
+                        Combinator::StdIn => unsafe { ffi::bfile::mystdin() }.into_value(mc),
+                        Combinator::StdOut => unsafe { ffi::bfile::mystdout() }.into_value(mc),
+                        Combinator::StdErr => unsafe { ffi::bfile::mystderr() }.into_value(mc),
                         c => Value::Combinator(c),
                     },
                     Expr::Float(f) => Value::Float(Float::from(*f)),

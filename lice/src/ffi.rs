@@ -1,7 +1,11 @@
 // for each function, we need to know:
 // - how many args (arity); all need to be evaluated strictly
 // - types of args and return value; also includes ffi types
-use crate::{integer::Integer, memory::Value, string::VString};
+use crate::{
+    integer::Integer,
+    memory::{FromValue, IntoValue},
+    string::VString,
+};
 use core::{ptr::null, str::FromStr};
 use gc_arena::{Collect, Mutation};
 use lice_macros::Reduce;
@@ -63,30 +67,24 @@ impl<T> From<ForeignPtr> for *mut T {
     }
 }
 
-impl<'gc, T> TryFrom<Value<'gc>> for *const T {
-    type Error = <ForeignPtr as TryFrom<Value<'gc>>>::Error;
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        Ok(ForeignPtr::try_from(value)?.into())
-    }
+impl<'gc> FromValue<'gc> for ForeignPtr {
+    from_gc_value!(ForeignPtr);
 }
 
-impl<'gc, T> TryFrom<Value<'gc>> for *mut T {
-    type Error = <ForeignPtr as TryFrom<Value<'gc>>>::Error;
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        Ok(ForeignPtr::try_from(value)?.into())
-    }
+impl<'gc, T> FromValue<'gc> for *const T {
+    from_gc_value!(ForeignPtr);
 }
 
-impl<T> From<*const T> for Value<'_> {
-    fn from(value: *const T) -> Self {
-        ForeignPtr::from(value).into()
-    }
+impl<'gc, T> FromValue<'gc> for *mut T {
+    from_gc_value!(ForeignPtr);
 }
 
-impl<T> From<*mut T> for Value<'_> {
-    fn from(value: *mut T) -> Self {
-        ForeignPtr::from(value).into()
-    }
+impl<'gc, T> IntoValue<'gc> for *const T {
+    into_gc_value!(ForeignPtr);
+}
+
+impl<'gc, T> IntoValue<'gc> for *mut T {
+    into_gc_value!(ForeignPtr);
 }
 
 /// Missing symbol; generates an error when reduced (but inert otherwise).
@@ -105,59 +103,60 @@ impl<'gc> BadDyn<'gc> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Collect, Reduce, parse_display::Display)]
 #[cfg_attr(feature = "std", derive(parse_display::FromStr))]
+#[cfg_attr(test, derive(strum::EnumIter))]
 #[allow(non_camel_case_types)]
 #[collect(require_static)]
 pub enum FfiSymbol {
     // GETRAW,
     // GETTIMEMILLI,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     acos,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     asin,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     atan,
-    #[reduce(from = "!a_float !b_float", returns = "float")]
+    #[reduce(from = "!a:float !b:float", to_io = "float")]
     atan2,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     cos,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     exp,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     log,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     sin,
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     sqrt,
 
-    #[reduce(from = "!float", returns = "float")]
+    #[reduce(from = "!float", to_io = "float")]
     tan,
 
-    #[reduce(from = "!path_str !mode_str", returns = "FILE_ptr")]
+    #[reduce(from = "!path:char* !mode:char*", to_io = "FILE*")]
     fopen,
-    #[reduce(from = "!FILE_ptr", returns = "handle")]
+    #[reduce(from = "!FILE*", to_io = "handle")]
     add_FILE,
-    #[reduce(from = "!handle", returns = "handle")]
+    #[reduce(from = "!handle", to_io = "handle")]
     add_utf8,
-    #[reduce(from = "!handle")]
+    #[reduce(from = "!handle", to_io = "void")]
     closeb,
-    #[reduce(from = "!handle")]
+    #[reduce(from = "!handle", to_io = "void")]
     flushb,
-    #[reduce(from = "!handle", returns = "char")]
+    #[reduce(from = "!handle", to_io = "char")]
     getb,
-    #[reduce(from = "!char !handle")]
+    #[reduce(from = "!char !handle", to_io = "void")]
     putb,
-    #[reduce(from = "!char !handle")]
+    #[reduce(from = "!char !handle", to_io = "void")]
     ungetb,
-    #[reduce(from = "!cmd_str", returns = "int")]
+    #[reduce(from = "!cmd_str", to_io = "int")]
     system,
-    #[reduce(from = "!pre_str !post_str", returns = "path_str")]
+    #[reduce(from = "!pre_str !post_str", to_io = "path_str")]
     tmpname,
-    #[reduce(from = "!path_str", returns = "int")]
+    #[reduce(from = "!path_str", to_io = "int")]
     unlink,
 
-    #[reduce(from = "!int", returns = "ptr")]
+    #[reduce(from = "!int", to_io = "ptr")]
     malloc,
-    #[reduce(from = "!ptr", returns = "unit")]
+    #[reduce(from = "!ptr", to_io = "unit")]
     free,
 }
 
@@ -172,4 +171,17 @@ impl FfiSymbol {
 #[allow(non_snake_case)]
 pub mod bfile {
     include!(concat!(env!("OUT_DIR"), "/bfile.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::combinator::Reduce;
+    #[test]
+    fn ffi_is_io() {
+        use strum::IntoEnumIterator;
+        for sym in FfiSymbol::iter() {
+            assert!(sym.io_action(), "{sym} should be an IO action")
+        }
+    }
 }

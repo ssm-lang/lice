@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod combinator;
 
 #[cfg(feature = "rt")]
+#[macro_use]
 pub mod memory;
 
 #[cfg(feature = "rt")]

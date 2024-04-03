@@ -2,7 +2,7 @@
 use crate::{
     combinator::Combinator,
     integer::Integer,
-    memory::{make_pair, App, Pointer, Value},
+    memory::{make_pair, App, IntoValue, Pointer, Value},
 };
 use alloc::ffi::CString;
 use core::ffi::CStr;
@@ -41,30 +41,42 @@ impl<'gc> core::fmt::Display for VString<'gc> {
     }
 }
 
-pub(crate) fn hstring_from_utf8<'gc>(mc: &Mutation<'gc>, s: &str) -> Pointer<'gc> {
+impl<'gc> IntoValue<'gc> for &str {
+    fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc> {
+        hstring_from_utf8(mc, self)
+    }
+}
+
+impl<'gc> IntoValue<'gc> for CString {
+    fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc> {
+        hstring_from_utf8(mc, &self.to_string_lossy())
+    }
+}
+
+impl<'gc> IntoValue<'gc> for &CStr {
+    fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc> {
+        hstring_from_utf8(mc, &self.to_string_lossy())
+    }
+}
+
+pub(crate) fn hstring_from_utf8<'gc>(mc: &Mutation<'gc>, s: &str) -> Value<'gc> {
     // TODO: don't allocate new combinators
-    let mut res = Pointer::new(mc, Value::Combinator(Combinator::NIL));
+    let mut res = Combinator::NIL.into_value(mc);
     if s.is_empty() {
         return res;
     }
-    let cons = Pointer::new(mc, Value::Combinator(Combinator::CONS));
-
+    let cons = Pointer::new(mc, Combinator::CONS);
     for c in s.chars().rev() {
-        let data = Pointer::new(mc, Value::Integer(Integer::from(c)));
-        let data = Pointer::new(
-            mc,
-            Value::App(App {
-                fun: cons,
-                arg: data,
-            }),
-        );
-        res = Pointer::new(
-            mc,
-            Value::App(App {
-                fun: data,
-                arg: res,
-            }),
-        );
+        res = Value::App(App {
+            fun: Pointer::new(
+                mc,
+                App {
+                    fun: cons,
+                    arg: Pointer::new(mc, c),
+                },
+            ),
+            arg: Pointer::new(mc, res),
+        });
     }
     res
 }
@@ -161,8 +173,10 @@ pub(crate) fn read_hstring(s: Pointer<'_>) -> Option<Vec<u8>> {
         let Value::Combinator(Combinator::CONS) = cons.follow().unpack() else {
             return None;
         };
-        let c =
-            char::try_from(c.follow().unpack()).expect("Haskell String should be a list of Chars");
+        let Value::Integer(c) = c.follow().unpack() else {
+            return None;
+        };
+        let c = char::from(c); // TODO: complain if not UTF-8
         let mut buf = [0; 4];
         bytes.extend(c.encode_utf8(&mut buf).as_bytes());
         cur = next.follow();
@@ -182,25 +196,17 @@ pub(crate) fn new_castringlen<'gc>(mc: &Mutation<'gc>, s: Pointer<'gc>) -> Optio
     Some(make_pair(
         mc,
         (
-            Pointer::new(mc, buf_ptr.into()),
-            Pointer::new(mc, cstring.as_bytes().len().into()),
+            Pointer::new(mc, buf_ptr),
+            Pointer::new(mc, cstring.as_bytes().len()),
         ),
     ))
 }
 
-pub(crate) fn peek_castring<'gc>(mc: &Mutation<'gc>, s: Pointer<'gc>) -> Pointer<'gc> {
-    let ptr = s.unpack().unwrap_foreign_ptr().into();
-    let cstr = unsafe { CStr::from_ptr(ptr) };
-    hstring_from_utf8(mc, cstr.to_str().unwrap())
+pub(crate) fn peek_castring<'gc>(ptr: *const core::ffi::c_char) -> &'gc str {
+    &unsafe { CStr::from_ptr(ptr) }.to_str().unwrap()
 }
 
-pub(crate) fn peek_castringlen<'gc>(
-    mc: &Mutation<'gc>,
-    s: Pointer<'gc>,
-    l: Pointer<'gc>,
-) -> Pointer<'gc> {
-    let ptr = s.unpack().unwrap_foreign_ptr().into();
+pub(crate) fn peek_castringlen<'gc>(ptr: *const core::ffi::c_char, len: usize) -> &'gc str {
     let cstr = unsafe { CStr::from_ptr(ptr) };
-    let len = l.unpack().unwrap_integer().signed().max(0) as usize;
-    hstring_from_utf8(mc, &cstr.to_str().unwrap()[0..len])
+    &cstr.to_str().unwrap()[0..len]
 }

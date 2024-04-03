@@ -16,7 +16,7 @@ for comb in combs/*.comb ; do
   case "$test" in mhs) continue ;; esac # don't attempt to run mhs
 
   printf "%-12s ... " "$test:"
-  if ! cargo run -q --release --bin lice-run "$comb" >"$result" 2>&1 ; then
+  if ! cargo run -q --release --bin lice --features=cli "$comb" >"$result" 2>&1 ; then
     echo -ne "\033[1;31m[ERR]\033[0;31m\t"
     if grep -q "not yet implemented: " < "$result" ; then
       grep "not yet implemented: " < "$result" | head -n 1

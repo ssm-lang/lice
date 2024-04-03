@@ -6,11 +6,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name              = "lice"
+required-features = ["cli"]
+
 [features]
-default = ["graph", "rt"]
-std = ["parse-display/std", "gc-arena/std"]
-file = ["std", "dep:nom"]
+default = ["cli"]
+cli = [
+  "file",
+  "rt",
+  "graph",
+  "dep:clap",
+  "dep:env_logger",
+]
 graph = ["file", "dep:petgraph"]
+file = ["std", "dep:nom"]
+std = ["parse-display/std", "gc-arena/std"]
 rt = [
   "dep:gc-arena",
   "dep:thin_str",
@@ -21,6 +32,11 @@ rt = [
   "dep:derive_more",
   "dep:read_char",
   "dep:once_cell",
+  "dep:libc",
+  "dep:ryu",
+  "dep:thiserror",
+  "dep:either",
+  "dep:strum",
 ]
 
 [dependencies]
@@ -31,11 +47,20 @@ parse-display = { version = "0.9", default-features = false }
 log           = { version = "0.4" }
 anyhow        = { version = "1.0", default-features = false }
 
+clap       = { optional = true, version = "4.4", features = ["derive"] }
+env_logger = { optional = true, version = "0.11" }
+
 nom = { optional = true, version = "7.1", default-features = false, features = [
   "alloc",
 ] }
 
 petgraph = { optional = true, version = "0.6" }
+
+derive_more = { optional = true, version = "1.0.0-beta.6", features = [
+  "from",
+  "unwrap",
+  "try_unwrap",
+] }
 
 gc-arena        = { optional = true, version = "0.5", default-features = false }
 thin_str        = { optional = true, version = "0.1" }
@@ -43,11 +68,13 @@ zerocopy        = { optional = true, version = "0.7" }
 zerocopy-derive = { optional = true, version = "0.7" }
 heapless        = { optional = true, version = "0.8" }
 bitvec          = { optional = true, version = "1" }
-derive_more     = { optional = true, version = "0.99" }
 read_char       = { optional = true, version = "0.1" }
 once_cell       = { optional = true, version = "1.19" }
-libc            = "0.2.153"
-ryu = "1.0"
+libc            = { optional = true, version = "0.2.153" }
+ryu             = { optional = true, version = "1.0" }
+thiserror       = { optional = true, version = "1.0" }
+either          = { optional = true, version = "1.10" }
+strum           = { optional = true, version = "0.26", features = ["derive"] }
 
 [build-dependencies]
 bindgen = { version = "0.69" }
