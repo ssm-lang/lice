@@ -31,22 +31,6 @@ impl<'gc> Unlock for Node<'gc> {
     }
 }
 
-#[derive(Clone, Copy, Collect, PartialEq)]
-#[collect(no_drop)]
-pub struct App<'gc> {
-    pub fun: Pointer<'gc>,
-    pub arg: Pointer<'gc>,
-}
-
-impl<'gc> Debug for App<'gc> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("App")
-            .field("fun", &Gc::as_ptr(self.fun.ptr))
-            .field("arg", &Gc::as_ptr(self.arg.ptr))
-            .finish()
-    }
-}
-
 /// Inner contents of a node.
 #[derive(
     Debug,
@@ -56,6 +40,8 @@ impl<'gc> Debug for App<'gc> {
     PartialEq,
     derive_more::From,
     derive_more::Unwrap,
+    derive_more::TryUnwrap,
+    derive_more::IsVariant,
     strum::IntoStaticStr,
 )]
 #[collect(no_drop)]
@@ -149,6 +135,26 @@ impl<'gc> From<()> for Value<'gc> {
     }
 }
 
+#[derive(Clone, Copy, Collect, PartialEq)]
+#[collect(no_drop)]
+pub struct App<'gc> {
+    pub fun: Pointer<'gc>,
+    pub arg: Pointer<'gc>,
+}
+
+impl<'gc> Debug for App<'gc> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("App")
+            .field("fun", &Gc::as_ptr(self.fun.ptr))
+            .field("arg", &Gc::as_ptr(self.arg.ptr))
+            .finish()
+    }
+}
+
+impl<'gc> FromValue<'gc> for App<'gc> {
+    from_gc_value!(App);
+}
+
 pub(crate) fn make_pair<'gc>(
     mc: &Mutation<'gc>,
     (x, y): (Pointer<'gc>, Pointer<'gc>),
@@ -208,6 +214,11 @@ impl<'gc> Pointer<'gc> {
         self.ptr.unlock(mc).set(value.into_value(mc))
     }
 
+    pub fn set_ref(&self, mc: &Mutation<'gc>, ptr: Pointer<'gc>) -> Pointer<'gc> {
+        self.ptr.unlock(mc).set(Value::Ref(ptr));
+        ptr
+    }
+
     pub fn follow(&self) -> Self {
         let mut ptr = *self;
         while let Value::Ref(p) = ptr.unpack() {
@@ -216,11 +227,12 @@ impl<'gc> Pointer<'gc> {
         ptr
     }
 
-    pub fn forward(&mut self, _mc: &Mutation<'gc>) {
-        // TODO: forward all pointers to final destination
+    pub fn forward(&mut self, _mc: &Mutation<'gc>) -> Self {
+        // TODO: forward all pointers to final destination?
         while let Value::Ref(p) = self.unpack() {
             *self = p;
         }
+        *self
     }
 }
 

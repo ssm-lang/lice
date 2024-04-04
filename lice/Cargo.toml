@@ -35,9 +35,9 @@ rt = [
   "dep:libc",
   "dep:ryu",
   "dep:thiserror",
-  "dep:either",
   "dep:strum",
   "dep:libmath",
+  "dep:debug_unwraps",
 ]
 
 [dependencies]
@@ -61,6 +61,7 @@ derive_more = { optional = true, version = "1.0.0-beta.6", features = [
   "from",
   "unwrap",
   "try_unwrap",
+  "is_variant",
 ] }
 
 gc-arena        = { optional = true, version = "0.5", default-features = false }
@@ -74,9 +75,9 @@ once_cell       = { optional = true, version = "1.19" }
 libc            = { optional = true, version = "0.2.153" }
 ryu             = { optional = true, version = "1.0" }
 thiserror       = { optional = true, version = "1.0" }
-either          = { optional = true, version = "1.10" }
 strum           = { optional = true, version = "0.26", features = ["derive"] }
 libmath         = { optional = true, version = "0.2" }
+debug_unwraps   = { optional = true, version = "0.1" }
 
 [build-dependencies]
 bindgen = { version = "0.69" }

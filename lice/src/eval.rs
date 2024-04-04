@@ -11,7 +11,6 @@ use bitvec::prelude::*;
 use core::{cell::OnceCell, fmt::Debug};
 use debug_unwraps::DebugUnwrapExt;
 use gc_arena::{Arena, Collect, Mutation, Rootable};
-use log::debug;
 
 /// Shorthand for my tomfoolery
 macro_rules! expect {
@@ -72,6 +71,7 @@ pub enum SpineError {
     NoPeek(usize),
 }
 
+/// Tidy this up, consolidate some of the errors and consider using `anyhow`.
 #[derive(thiserror::Error, Debug)]
 pub enum VMError {
     #[error("IO monad terminated with constant value {0}")]
@@ -759,12 +759,12 @@ impl<'gc> State<'gc> {
         loop {
             match self.tip.unpack() {
                 Value::App(App { fun, arg: _ }) => {
-                    debug!("Pushing {:?} to spine", self.tip);
+                    log::trace!("Pushing {:?} to spine", self.tip);
                     self.spine.push(self.tip);
                     self.tip = fun;
                 }
                 Value::Ref(_) => {
-                    debug!("Forwarding {:?}", self.tip);
+                    log::trace!("Forwarding {:?}", self.tip);
                     self.tip.forward(mc);
                 }
                 _ => break,

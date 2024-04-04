@@ -1,7 +1,7 @@
 use clap::Parser;
 use lice::{
     eval::{VMError, VM},
-    file::CombFile,
+    file::CombFile, combinator::Combinator,
 };
 use log::{error, info};
 use std::{fs::File, io::Read, path::PathBuf, process};
@@ -39,7 +39,7 @@ fn main() {
         info!("VM step {i}");
         match vm.step() {
             Ok(_) => i += 1,
-            Err(VMError::AlreadyDone) => break,
+            Err(VMError::IOTerminated(Combinator::UNIT)) => break,
             Err(e) => panic!("{e}"),
         }
     }
