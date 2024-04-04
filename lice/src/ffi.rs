@@ -27,7 +27,7 @@ impl ForeignPtr {
     }
 
     pub fn as_ptr(self) -> *mut u8 {
-        self.0 as *mut u8
+        self.0.cast::<u8>()
     }
 
     pub fn peq(self, rhs: Self) -> bool {
@@ -45,25 +45,25 @@ impl ForeignPtr {
 
 impl<T> From<*mut T> for ForeignPtr {
     fn from(value: *mut T) -> Self {
-        Self(value as *mut ())
+        Self(value.cast::<()>())
     }
 }
 
 impl<T> From<*const T> for ForeignPtr {
     fn from(value: *const T) -> Self {
-        Self(value as *mut ())
-    }
-}
-
-impl<T> From<ForeignPtr> for *const T {
-    fn from(value: ForeignPtr) -> Self {
-        value.0 as *const T
+        Self::from(value.cast_mut())
     }
 }
 
 impl<T> From<ForeignPtr> for *mut T {
     fn from(value: ForeignPtr) -> Self {
-        value.0 as *mut T
+        value.0.cast::<T>()
+    }
+}
+
+impl<T> From<ForeignPtr> for *const T {
+    fn from(value: ForeignPtr) -> Self {
+        <*mut T>::from(value).cast_const()
     }
 }
 
