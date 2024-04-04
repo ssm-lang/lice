@@ -71,6 +71,8 @@ pub enum SpineError {
     NoPeek(usize),
 }
 
+type VMResult<T> = Result<T, VMError>;
+
 /// Tidy this up, consolidate some of the errors and consider using `anyhow`.
 #[derive(thiserror::Error, Debug)]
 pub enum VMError {
@@ -106,13 +108,11 @@ pub enum VMError {
     IOIncomplete(usize),
 }
 
-type VMResult<T> = Result<T, VMError>;
-
+/// INVARIANT: At all times, `watermark <= stack.len()`.
 #[derive(Collect, Default)]
 #[collect(no_drop)]
 struct Spine<'gc> {
     stack: Vec<Pointer<'gc>>,
-    /// Invariant: at all times, `watermark <= stack.len()`.
     watermark: usize,
 }
 
@@ -124,6 +124,17 @@ impl<'gc> Spine<'gc> {
             self.watermark,
             self.stack.len()
         );
+    }
+
+    fn size(&self) -> usize {
+        self.check_invariant();
+        self.stack.len() - self.watermark
+    }
+
+    fn has_args(&self, num: usize) -> bool {
+        self.check_invariant();
+        // use saturating sub here to avoid bounds check
+        self.watermark <= self.stack.len().saturating_sub(num)
     }
 
     fn push(&mut self, app: Pointer<'gc>) {
@@ -142,12 +153,6 @@ impl<'gc> Spine<'gc> {
         self.stack.get(idx).cloned().ok_or(SpineError::NoPeek(idx))
     }
 
-    fn has_args(&self, num: usize) -> bool {
-        self.check_invariant();
-        // use saturating sub here to avoid bounds check
-        self.watermark <= self.stack.len().saturating_sub(num)
-    }
-
     fn save(&mut self) -> usize {
         let prev = self.watermark;
         self.watermark = self.stack.len();
@@ -164,28 +169,45 @@ impl<'gc> Spine<'gc> {
 }
 
 /// Pending strict evaluation some combinator's arguments.
-#[derive(Debug, Collect, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(require_static)]
 struct StrictWork {
     op: Operator,
     args: BitArr!(for Self::MAX_ARGS),
     watermark: usize,
 }
+impl Debug for StrictWork {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut bitslice: [bool; Self::MAX_ARGS] = [false; Self::MAX_ARGS];
+        for (i, b) in bitslice.iter_mut().enumerate() {
+            *b = self.args[i];
+        }
+        f.debug_struct("StrictWork")
+            .field("op", &self.op)
+            .field("args", &bitslice)
+            .field("watermark", &self.watermark)
+            .finish()
+    }
+}
 
 impl StrictWork {
     const MAX_ARGS: usize = 4;
 
-    // TODO: don't use unpack_arg()
     fn init<'gc>(
         mc: &Mutation<'gc>,
         op: Operator,
         spine: &mut Spine<'gc>,
-    ) -> Option<(Self, Pointer<'gc>)> {
+    ) -> VMResult<Option<(Self, Pointer<'gc>)>> {
+        log::trace!(
+            "Evaluated tip to {op}, checking whether {} arguments need to be evaluated.",
+            op.arity()
+        );
         debug_assert!(
             spine.has_args(op.strictness().len()),
             "spine should have at least {} arguments when starting strict work for {op}",
             op.strictness().len(),
         );
+
         // Figure out which args need to be evaluated, i.e., are not yet WHNF
         // Default state: we don't need to evalute each arg
         let mut args = BitArray::new([0]);
@@ -194,8 +216,21 @@ impl StrictWork {
         let first = OnceCell::new();
 
         for (idx, is_strict) in op.strictness().iter().enumerate() {
+            if !*is_strict {
+                #[cfg(debug_assertions)]
+                {
+                    let arg = spine.peek(idx).unwrap();
+                    assert!(
+                        arg.unpack().is_app(),
+                        "argument {idx} of {op} should be an app node, but it was {arg:?}"
+                    );
+                }
+                log::trace!("..... Arg {idx} is not strict, no need to check");
+                continue;
+            }
             let app = expect!(spine.peek(idx)).forward(mc);
-            if *is_strict && !app.unpack_arg().forward(mc).unpack().whnf() {
+            let arg = unpack_arg(app, idx, op)?.forward(mc);
+            if !arg.unpack().whnf() {
                 // Remember the first argument that needs evaluating:
                 let is_pending = first.set(idx).is_err();
                 if is_pending {
@@ -203,43 +238,63 @@ impl StrictWork {
                     // is evaluated, so we mark it as such:
                     args.set(idx, true);
                 }
+                log::trace!("..... Arg {idx} is strict and not already in WHNF: {arg:?}");
+            } else {
+                log::trace!("..... Arg {idx} is strict, but already in WHNF: {arg:?}");
             }
         }
-        let first = *first.get()?; // If no args need to be evaluated, then return None
-        let first = expect!(spine.peek(first));
-        Some((
-            Self {
+
+        if let Some(first) = first.get() {
+            let next = expect!(spine.peek(*first)); // No need to forward, already done in loop
+            let watermark = spine.save();
+            let work = Self {
                 op,
                 args,
-                watermark: spine.save(),
-            },
-            first.unpack_arg(),
-        ))
+                watermark,
+            };
+            log::trace!("==> Next, evaluating argument {first} of {op}: {next:?}");
+            log::trace!("    with pending work {work:?}");
+            Ok(Some((work, next)))
+        } else {
+            log::trace!("... No arguments of {op} need to be evaluated");
+            Ok(None)
+        }
     }
 
     /// Advance the pending arg state.
-    ///
-    /// TODO: don't use unpack_arg()
-    fn advance<'gc>(&mut self, mc: &Mutation<'gc>, spine: &mut Spine<'gc>) -> Option<Pointer<'gc>> {
-        // No need to iterate over index 0 because it should never have been set.
+    fn advance<'gc>(
+        &mut self,
+        mc: &Mutation<'gc>,
+        spine: &mut Spine<'gc>,
+    ) -> VMResult<Option<Pointer<'gc>>> {
+        log::trace!("... Resuming {:?}", self);
+        debug_assert!(
+            spine.has_args(self.op.strictness().len()),
+            "spine should have at least {} arguments when starting strict work for {}",
+            self.op.strictness().len(),
+            self.op
+        );
+        debug_assert!(!self.args[0], "index 0 should never be set");
         for idx in 1..Self::MAX_ARGS {
             if self.args[idx] {
                 self.args.set(idx, false);
-
-                let app = expect!(
-                    spine.peek(idx),
-                    "all arguments should be in spine when resuming strict work",
-                )
-                .forward(mc);
-                let arg = app.unpack_arg().forward(mc);
+                let app = expect!(spine.peek(idx)).forward(mc);
+                let arg = unpack_arg(app, idx, self.op)?.forward(mc);
                 if !arg.unpack().whnf() {
-                    // Only evaluate this arg next if it is not in WHNF yet
-                    return Some(app.unpack_arg().follow());
+                    log::trace!("..... Arg {idx} will be evaluated next: {arg:?}");
+                    return Ok(Some(arg));
                 }
+                log::trace!(
+                    "..... Arg {idx} was previously scheduled, but it is now in WHNF: {arg:?}"
+                );
             }
         }
+        log::trace!(
+            "... No more work needs to be done, all {} arguments in WHNF",
+            self.op.arity()
+        );
         spine.restore(self.watermark);
-        None
+        Ok(None)
     }
 }
 
@@ -287,6 +342,26 @@ impl<'gc> State<'gc> {
         }
     }
 
+    fn pop_arg<T: FromValue<'gc> + Debug>(
+        &mut self,
+        mc: &Mutation<'gc>,
+        index: usize,
+        op: Operator,
+    ) -> VMResult<(Pointer<'gc>, T)> {
+        let app = expect!(self.spine.pop()).forward(mc);
+        let arg = unpack_arg(app, index, op)?.forward(mc);
+        let arg = T::from_value(mc, arg.unpack()).map_err(|source| VMError::TypeError {
+            op,
+            index,
+            source,
+        })?;
+        log::trace!(
+            "..... Popped argument {index} of type {} from spine: {arg:?}",
+            core::any::type_name::<T>()
+        );
+        Ok((app, arg))
+    }
+
     /// Symbolic handler for combinators with well-defined "redux code".
     ///
     /// With luck, the `rustc` optimizer will unroll this stack machine interpreter into efficient
@@ -309,6 +384,7 @@ impl<'gc> State<'gc> {
     #[inline(always)]
     #[track_caller]
     fn do_redux(&mut self, mc: &Mutation<'gc>, comb: Combinator) -> VMResult<Pointer<'gc>> {
+        log::trace!("... Performing reduction for {comb:?}");
         debug_assert!(
             self.spine.has_args(comb.strictness().len()),
             "spine should have at least {} arguments when starting strict work for {comb}",
@@ -325,6 +401,7 @@ impl<'gc> State<'gc> {
             let arg = unpack_arg(app, index, comb)?;
             expect!(args.push(arg));
             top = app;
+            log::trace!("..... Argument {index}: {arg:?}");
         }
 
         for b in &code[..code.len() - 1] {
@@ -356,6 +433,7 @@ impl<'gc> State<'gc> {
             stk.is_empty(),
             "{comb} redux code not well-formed: stack should be empty after reduction"
         );
+        log::trace!("==> Reduced to {next:?}");
         Ok(next)
     }
 
@@ -384,15 +462,20 @@ impl<'gc> State<'gc> {
                     next = Pointer::new(mc, App { fun: next, arg: k });
                 }
                 self.spine.push(continuation);
+                log::trace!("==> {io:?} context saved, with continuation {continuation:?}");
+                log::trace!("    Evaluating next: {next:?}");
             }
             IO::Then => {
                 let app = expect!(self.spine.pop());
                 let continuation = unpack_arg(app, 1, comb)?;
                 self.spine.push(continuation);
+                log::trace!("==> {io:?} context saved, with continuation {continuation:?}");
+                log::trace!("    Evaluating next: {next:?}");
             }
             IO::Perform => {
                 // Push the top app node back onto the spine. We will overwrite it later.
                 self.spine.push(top);
+                log::trace!("==> {io:?} context saved, will unwrap next: {next:?}");
             }
         }
         self.io_context.push(io);
@@ -401,8 +484,8 @@ impl<'gc> State<'gc> {
 
     fn resume_io(&mut self, mc: &Mutation<'gc>, value: Pointer<'gc>) -> VMResult<Pointer<'gc>> {
         let Some(io) = self.io_context.pop() else {
-            let value = value.follow().unpack();
-            return Err(value.try_unwrap_combinator().map_or_else(
+            log::trace!("==> No IO context to handle {value:?}");
+            return Err(value.follow().unpack().try_unwrap_combinator().map_or_else(
                 |v| VMError::IONoContext(v.input.into()), // terminated with non-combinator value
                 VMError::IOTerminated,                    // terminated with combinator constant
             ));
@@ -423,26 +506,28 @@ impl<'gc> State<'gc> {
                     arg: value,
                 },
             ),
-            IO::Then => continuation, // Ignore the monadic value, return the continuation
-            IO::Perform => continuation.set_ref(mc, value), // Set the top node applying PerformIO to the resulting value
+            IO::Then => {
+                // Ignore the monadic value, return the continuation
+                continuation
+            }
+            IO::Perform => {
+                // Set the top node applying PerformIO to the resulting value
+                continuation.set_ref(mc, value)
+            }
         };
+        log::trace!("==> Resuming in {io:?} context with continuation {continuation:?}");
         Ok(next)
     }
 
-    fn pop_arg<T: FromValue<'gc>>(
+    fn resume_pure(
         &mut self,
         mc: &Mutation<'gc>,
-        index: usize,
-        op: Operator,
-    ) -> VMResult<(Pointer<'gc>, T)> {
-        let app = expect!(self.spine.pop()).forward(mc);
-        let arg = unpack_arg(app, index, op)?.forward(mc);
-        let arg = T::from_value(mc, arg.unpack()).map_err(|source| VMError::TypeError {
-            op,
-            index,
-            source,
-        })?;
-        Ok((app, arg))
+        next: Pointer<'gc>,
+        value: impl IntoValue<'gc>,
+    ) -> VMResult<Pointer<'gc>> {
+        next.set(mc, value);
+        log::trace!("==> Resuming in pure context with next {next:?}");
+        Ok(next)
     }
 
     fn handle_unop<P, R>(
@@ -452,7 +537,7 @@ impl<'gc> State<'gc> {
         handler: impl FnOnce(P) -> R,
     ) -> VMResult<Pointer<'gc>>
     where
-        P: Copy + FromValue<'gc>,
+        P: Debug + Copy + FromValue<'gc>,
         R: IntoValue<'gc>,
     {
         let op: Operator = op.into();
@@ -460,12 +545,15 @@ impl<'gc> State<'gc> {
 
         let (top, arg0) = self.pop_arg::<P>(mc, 0, op)?;
         let value = handler(arg0).into_value(mc);
+        log::trace!(
+            "... {op} returned value of type {}: {value:?}",
+            core::any::type_name::<R>()
+        );
 
         if op.io_action() {
             self.resume_io(mc, Pointer::new(mc, value))
         } else {
-            top.set(mc, value);
-            Ok(top)
+            self.resume_pure(mc, top, value)
         }
     }
 
@@ -476,8 +564,8 @@ impl<'gc> State<'gc> {
         handler: impl FnOnce(P, Q) -> R,
     ) -> VMResult<Pointer<'gc>>
     where
-        P: Copy + FromValue<'gc>,
-        Q: Copy + FromValue<'gc>,
+        P: Debug + Copy + FromValue<'gc>,
+        Q: Debug + Copy + FromValue<'gc>,
         R: IntoValue<'gc>,
     {
         let op: Operator = op.into();
@@ -486,17 +574,53 @@ impl<'gc> State<'gc> {
         let (_, arg0) = self.pop_arg::<P>(mc, 0, op)?;
         let (top, arg1) = self.pop_arg::<Q>(mc, 1, op)?;
         let value = handler(arg0, arg1).into_value(mc);
+        log::trace!(
+            "... {op} returned value of type {}: {value:?}",
+            core::any::type_name::<R>()
+        );
 
         if op.io_action() {
             self.resume_io(mc, Pointer::new(mc, value))
         } else {
-            top.set(mc, value);
-            Ok(top)
+            self.resume_pure(mc, top, value)
+        }
+    }
+
+    fn handle_from_utf8(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::FromUtf8;
+        let (top, s) = self.pop_arg::<Value>(mc, 0, comb.into())?;
+        let s = s.try_unwrap_string().map_err(|got| VMError::TypeError {
+            op: comb.into(),
+            index: 0,
+            source: ConversionError {
+                expected: "string",
+                got: got.input.into(),
+            },
+        })?;
+        let res = crate::string::hstring_from_utf8(mc, s.as_ref());
+        log::trace!("... {comb:?} returned {res:?}");
+        self.resume_pure(mc, top, res)
+    }
+
+    fn handle_new_castring(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::CAStringLenNew;
+        let top = expect!(self.spine.pop()).forward(mc);
+        let s = unpack_arg(top, 0, comb)?.forward(mc);
+
+        if let Some(cas) = new_castringlen(mc, s) {
+            log::trace!("... {comb:?} returned {cas:?}");
+            self.resume_io(mc, cas)
+        } else {
+            let new = Pointer::new(mc, comb);
+            let again = Pointer::new(mc, App { fun: new, arg: s });
+            log::trace!("... {comb:?} arguments were not fully-evaluated, scheduling <$> seq before returning to {again:?}");
+            self.resume_pure(mc, top, eval_hstring(mc, s, again))
         }
     }
 
     /// `next` has been reduced to the given combinator, with all strict arguments evaluated.
     fn eval_comb(&mut self, comb: Combinator, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        log::trace!("Handling combinator reduction: {comb:?}");
         debug_assert!(
             self.spine.has_args(comb.arity()),
             "spine should have at least {} arguments when evaluating {comb}",
@@ -620,40 +744,15 @@ impl<'gc> State<'gc> {
             Combinator::ArrWrite => todo!("{comb:?}"),
             Combinator::ArrEq => todo!("{comb:?}"),
 
-            Combinator::FromUtf8 => {
-                let (top, s) = self.pop_arg::<Value>(mc, 0, comb.into())?;
-                let s = s.try_unwrap_string().map_err(|got| VMError::TypeError {
-                    op: comb.into(),
-                    index: 0,
-                    source: ConversionError {
-                        expected: "string",
-                        got: got.input.into(),
-                    },
-                })?;
-                let res = crate::string::hstring_from_utf8(mc, s.as_ref());
-                let res = Pointer::new(mc, res);
-                top.set(mc, res);
-                Ok(res)
-            }
-            Combinator::CAStringLenNew => {
-                let top = expect!(self.spine.pop()).forward(mc);
-                let s = unpack_arg(top, 0, comb)?.forward(mc);
-
-                if let Some(cas) = new_castringlen(mc, s) {
-                    self.resume_io(mc, cas)
-                } else {
-                    let new = Pointer::new(mc, Combinator::CAStringLenNew);
-                    let again = Pointer::new(mc, App { fun: new, arg: s });
-                    top.set(mc, eval_hstring(mc, s, again));
-                    Ok(top)
-                }
-            }
+            Combinator::FromUtf8 => self.handle_from_utf8(mc),
+            Combinator::CAStringLenNew => self.handle_new_castring(mc),
             Combinator::CAStringPeek => self.handle_unop(mc, comb, peek_castring),
             Combinator::CAStringPeekLen => self.handle_binop(mc, comb, peek_castringlen),
         }
     }
 
     fn eval_ffi(&mut self, ffi: FfiSymbol, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        log::trace!("Handling FFI call: {ffi}");
         debug_assert!(
             self.spine.has_args(ffi.arity()),
             "spine should have at least {} arguments when evaluating {ffi}",
@@ -699,12 +798,18 @@ impl<'gc> State<'gc> {
 
     fn start_strict(&mut self, op: Operator, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
         if !self.spine.has_args(op.arity()) {
+            log::trace!(
+                "Evaluated tip to {op} (arity = {}), but spine only has {} arguments left",
+                op.arity(),
+                self.spine.size()
+            );
+            log::trace!(
+                "==> treating partially-applied {op} as a value and resuming strict evaluation."
+            );
             return self.resume_strict(mc);
         }
 
-        if let Some((work, first)) = StrictWork::init(mc, op, &mut self.spine) {
-            // `next` has been reduced to a combinator, though one or more of its arguments
-            // may still need to be evaluated before it can be handled
+        if let Some((work, first)) = StrictWork::init(mc, op, &mut self.spine)? {
             self.strict_context.push(work);
             Ok(first)
         } else {
@@ -721,12 +826,13 @@ impl<'gc> State<'gc> {
         // previously demanded strict arguments. We check our strict continuation context
         // to see if we still need to evaluate more arguments, or if we can now handle the
         // strict operator.
+        log::trace!("Evaluated tip to value {:?}", self.tip.unpack());
         let work = self
             .strict_context
             .last_mut()
             .ok_or(VMError::UnexpectedValue(self.tip.unpack().into()))?;
 
-        if let Some(next) = work.advance(mc, &mut self.spine) {
+        if let Some(next) = work.advance(mc, &mut self.spine)? {
             Ok(next)
         } else {
             let op = work.op;
@@ -739,12 +845,14 @@ impl<'gc> State<'gc> {
     }
 
     fn handle_tick(&mut self, t: Tick) -> Result<Pointer<'gc>, VMError> {
-        self.tick_table.tick(t)?;
+        let tick = self.tick_table.tick(t)?;
         let app = self.spine.pop().map_err(|source| VMError::TickResume {
-            tick: self.tick_table.info(t).clone(),
+            tick: tick.clone(),
             source,
         })?;
         if let Value::App(App { fun: _, arg }) = app.unpack() {
+            log::trace!("  ! Handled tick: {tick:?}");
+            log::trace!("    and resuming execution at {arg:?}");
             Ok(arg)
         } else {
             Err(VMError::TickNotApp {
@@ -759,25 +867,29 @@ impl<'gc> State<'gc> {
         loop {
             match self.tip.unpack() {
                 Value::App(App { fun, arg: _ }) => {
-                    log::trace!("Pushing {:?} to spine", self.tip);
+                    log::trace!("  @ Pushing {:?} to spine", self.tip);
                     self.spine.push(self.tip);
                     self.tip = fun;
                 }
                 Value::Ref(_) => {
-                    log::trace!("Forwarding {:?}", self.tip);
+                    log::trace!("  * Forwarding {:?}", self.tip);
                     self.tip.forward(mc);
+                }
+                Value::Tick(t) => {
+                    self.tip = self.handle_tick(t)?;
                 }
                 _ => break,
             }
         }
 
         self.tip = match self.tip.unpack() {
-            Value::Ref(_) | Value::App(_) => unreachable!("unexpected: {:?}", self.tip),
+            Value::Ref(_) | Value::App(_) | Value::Tick(_) => {
+                unreachable!("unexpected: {:?}", self.tip)
+            }
             Value::Combinator(comb) => self.start_strict(comb.into(), mc),
             Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::ForeignPtr(_) => {
                 self.resume_strict(mc)
             }
-            Value::Tick(t) => self.handle_tick(t),
             Value::Ffi(ffi) => self.start_strict(ffi.into(), mc),
             Value::BadDyn(sym) => Err(VMError::BadDyn(sym.name().to_string())),
         }?;

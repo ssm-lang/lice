@@ -47,14 +47,14 @@ impl TickTable {
         })
     }
 
-    pub(crate) fn tick(&mut self, tick: Tick) -> Result<(), TickError> {
+    pub(crate) fn tick(&mut self, tick: Tick) -> Result<&TickInfo, TickError> {
         let entry = self
             .table
             .get_mut(tick.0)
             .ok_or(TickError::MissingEntry(tick.0))?;
         entry.count += 1;
         log::info!("encountered tick: {} = {}", entry.name, entry.count);
-        Ok(())
+        Ok(entry)
     }
 
     pub(crate) fn info(&self, tick: Tick) -> &TickInfo {
