@@ -244,8 +244,9 @@ impl StrictWork {
             }
         }
 
-        if let Some(first) = first.get() {
-            let next = expect!(spine.peek(*first)); // No need to forward, already done in loop
+        if let Some(&first) = first.get() {
+            let next = expect!(spine.peek(first)); // No need to forward, already done in loop
+            let next = expect!(unpack_arg(next, first, op)); // Can be safely unwrapped, we already checked this during loop
             let watermark = spine.save();
             let work = Self {
                 op,
@@ -268,12 +269,6 @@ impl StrictWork {
         spine: &mut Spine<'gc>,
     ) -> VMResult<Option<Pointer<'gc>>> {
         log::trace!("... Resuming {:?}", self);
-        debug_assert!(
-            spine.has_args(self.op.strictness().len()),
-            "spine should have at least {} arguments when starting strict work for {}",
-            self.op.strictness().len(),
-            self.op
-        );
         debug_assert!(!self.args[0], "index 0 should never be set");
         for idx in 1..Self::MAX_ARGS {
             if self.args[idx] {
@@ -294,6 +289,12 @@ impl StrictWork {
             self.op.arity()
         );
         spine.restore(self.watermark);
+        debug_assert!(
+            spine.has_args(self.op.strictness().len()),
+            "spine should have at least {} arguments when starting strict work for {}",
+            self.op.strictness().len(),
+            self.op
+        );
         Ok(None)
     }
 }
@@ -954,6 +955,14 @@ mod tests {
     use super::*;
     use gc_arena::Arena;
 
+    fn init() {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Trace)
+            .try_init()
+            .unwrap_or_else(|_| log::set_max_level(log::LevelFilter::Trace));
+    }
+
     macro_rules! comb {
         ($mc:ident, $c:ident) => {
             Pointer::new($mc, Combinator::$c)
@@ -996,6 +1005,7 @@ mod tests {
 
     #[test]
     fn arith420() {
+        init();
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let top = app!(mc, :Mul, #42, #10);
@@ -1020,11 +1030,40 @@ mod tests {
 
     #[test]
     fn arith420_nested() {
-        // TODO: something like (40 + 2) * 10
+        init();
+        type Root = Rootable![(State<'_>, Pointer<'_>)];
+        let mut arena: Arena<Root> = Arena::new(|mc| {
+            let top = app!(mc, :Mul, @(:Add, #40, #2), @(:Add, #4, #6));
+            (State::new(top, Default::default()), top)
+        });
+        arena.mutate_root(|mc, (st, _)| st.steps(mc, 5)).unwrap();
+        // 5 reducing steps should be sufficient:
+        //
+        //      @ tip points to ((* ((+ 40) 2)) ((+ 4) 6))
+        //      @ tip points to (* ((+ 40) 2))
+        //      @ tip points to *
+        //      ! start strict *, tip points to ((+ 40) 2)
+        //      @ tip points to (+ 40)
+        //      @ tip points to +
+        //      ! reduce +, tip points to 42
+        //      ! resume strict, tip points to ((+ 4) 6)
+        //      @ tip points to (+ 4)
+        //      @ tip points to +
+        //      ! reduce +, tip points to 10
+        //      ! resume strict, reduce *, tip points to 420
+        arena.mutate(|_, (st, top)| {
+            assert_eq!(st.tip, *top, "tip is back at top");
+            assert_eq!(
+                top.unpack(),
+                Value::Integer(Integer::from(420)),
+                "top was modified in place, to value of 420",
+            );
+        });
     }
 
     #[test]
     fn skkr() {
+        init();
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let (s, k, r) = (comb!(mc, S), comb!(mc, K), comb!(mc, R));
@@ -1060,6 +1099,7 @@ mod tests {
 
     #[test]
     fn io_traversal() {
+        init();
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let bottom = app!(mc, :Neg, :Neg); // Should never be eval'd
@@ -1097,6 +1137,7 @@ mod tests {
 
     #[test]
     fn seq() {
+        init();
         // TODO: use seq to check that strictness is working as expected
     }
 }
