@@ -376,7 +376,7 @@ pub enum Combinator {
     PerformIO,
     /// Execute a term, and catch any thrown exception.
     #[display("IO.catch")]
-    #[reduce(from = "!term handler", to_io = "term")]
+    #[reduce(from = "term handler", to_io = "term")]
     Catch,
     /// A dynamic FFI lookup from a Haskell string.
     #[display("dynsym")]

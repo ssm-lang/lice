@@ -144,12 +144,14 @@ impl<'gc> Spine<'gc> {
 
     fn pop(&mut self) -> Result<Pointer<'gc>, SpineError> {
         self.check_invariant();
+        // FIXME: check watermark too
         self.stack.pop().ok_or(SpineError::NoPop)
     }
 
     fn peek(&self, idx: usize) -> Result<Pointer<'gc>, SpineError> {
         self.check_invariant();
         let idx = self.stack.len() - 1 - idx;
+        // FIXME: check watermark too
         self.stack.get(idx).cloned().ok_or(SpineError::NoPeek(idx))
     }
 
@@ -302,9 +304,17 @@ impl StrictWork {
 #[derive(Clone, Copy, Collect, Debug)]
 #[collect(require_static)]
 pub enum IO {
-    Bind { cc: bool },
+    Bind {
+        cc: bool,
+    },
     Then,
     Perform,
+    Catch {
+        /// Spine state
+        watermark: usize,
+        /// Strict evaluation context??
+        strict_index: usize,
+    },
 }
 impl From<IO> for Combinator {
     fn from(value: IO) -> Self {
@@ -318,6 +328,7 @@ impl From<IO> for Combinator {
             }
             IO::Then => Combinator::Then,
             IO::Perform => Combinator::PerformIO,
+            IO::Catch { .. } => Combinator::Catch,
         }
     }
 }
@@ -438,60 +449,34 @@ impl<'gc> State<'gc> {
         Ok(next)
     }
 
-    /// Handle one of the core [`IO`] combinators.
-    ///
-    /// Like [`State::do_redux()`], this function should not
-    fn start_io(&mut self, mc: &Mutation<'gc>, io: IO) -> VMResult<Pointer<'gc>> {
-        let comb = Combinator::from(io);
-        debug_assert!(
-            // not necessary, callers did this already
-            self.spine.has_args(comb.arity()),
-            "spine should have at least {} arguments when reducing IO node {comb}",
-            comb.arity()
-        );
-        let top = expect!(self.spine.pop());
-        let mut next = unpack_arg(top, 0, comb)?;
-
-        // Prepare spine for continuation
-        match io {
-            IO::Bind { cc } => {
-                let app = expect!(self.spine.pop());
-                let continuation = unpack_arg(app, 1, comb)?;
-                if cc {
-                    let app = expect!(self.spine.pop());
-                    let k = unpack_arg(app, 2, comb)?;
-                    next = Pointer::new(mc, App { fun: next, arg: k });
-                }
-                self.spine.push(continuation);
-                log::trace!("==> {io:?} context saved, with continuation {continuation:?}");
-                log::trace!("    Evaluating next: {next:?}");
-            }
-            IO::Then => {
-                let app = expect!(self.spine.pop());
-                let continuation = unpack_arg(app, 1, comb)?;
-                self.spine.push(continuation);
-                log::trace!("==> {io:?} context saved, with continuation {continuation:?}");
-                log::trace!("    Evaluating next: {next:?}");
-            }
-            IO::Perform => {
-                // Push the top app node back onto the spine. We will overwrite it later.
-                self.spine.push(top);
-                log::trace!("==> {io:?} context saved, will unwrap next: {next:?}");
-            }
-        }
-        self.io_context.push(io);
-        Ok(next)
-    }
-
     fn resume_io(&mut self, mc: &Mutation<'gc>, value: Pointer<'gc>) -> VMResult<Pointer<'gc>> {
-        let Some(io) = self.io_context.pop() else {
-            log::trace!("==> No IO context to handle {value:?}");
-            return Err(value.follow().unpack().try_unwrap_combinator().map_or_else(
-                |v| VMError::IONoContext(v.input.into()), // terminated with non-combinator value
-                VMError::IOTerminated,                    // terminated with combinator constant
-            ));
+        let io = loop {
+            let Some(io) = self.io_context.pop() else {
+                log::trace!("==> No IO context to handle {value:?}");
+                return Err(value.follow().unpack().try_unwrap_combinator().map_or_else(
+                    |v| VMError::IONoContext(v.input.into()), // terminated with non-combinator value
+                    VMError::IOTerminated,                    // terminated with combinator constant
+                ));
+            };
+
+            match io {
+                IO::Catch {
+                    watermark,
+                    strict_index,
+                } => {
+                    self.spine.restore(watermark);
+                    debug_assert!(
+                        self.strict_context.len() == strict_index,
+                        "strict index should still be where it was before"
+                    );
+                    let _handler = self.spine.pop().expect("TODO");
+                    log::trace!("==> Popped IO.catch context with handler: {_handler:?}");
+                }
+                _ => break io,
+            }
         };
-        let continuation = self
+
+        let continuation = self // This should be an expect!()
             .spine
             .pop()
             .map_err(|source| VMError::IONoContinuation {
@@ -515,6 +500,7 @@ impl<'gc> State<'gc> {
                 // Set the top node applying PerformIO to the resulting value
                 continuation.set_ref(mc, value)
             }
+            IO::Catch { .. } => unreachable!("{io:?} should have been handled in loop"),
         };
         log::trace!("==> Resuming in {io:?} context with continuation {continuation:?}");
         Ok(next)
@@ -585,6 +571,70 @@ impl<'gc> State<'gc> {
         } else {
             self.resume_pure(mc, top, value)
         }
+    }
+
+    fn start_bind(&mut self, mc: &Mutation<'gc>, io: IO) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::from(io);
+
+        let app = expect!(self.spine.pop());
+        let mut next = unpack_arg(app, 0, comb)?;
+
+        // TODO: consider getting rid of this pop/push, just leave the continuation in place, like
+        // in Catch
+        let app = expect!(self.spine.pop());
+        let continuation = unpack_arg(app, 1, comb)?;
+        self.spine.push(continuation);
+
+        if let IO::Bind { cc: true } = io {
+            let app = expect!(self.spine.pop());
+            let k = unpack_arg(app, 2, comb)?;
+            next = Pointer::new(mc, App { fun: next, arg: k });
+        }
+
+        self.io_context.push(io);
+        log::trace!("==> {io:?} context saved, with continuation {continuation:?}");
+        log::trace!("    Evaluating next: {next:?}");
+        Ok(next)
+    }
+
+    fn start_performio(&mut self, _mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::PerformIO;
+
+        let top = expect!(self.spine.peek(0));
+        let next = unpack_arg(top, 0, comb)?;
+
+        self.io_context.push(IO::Perform);
+        log::trace!("==> {comb} context saved, will overwrite {top:?}");
+        log::trace!("    Evaluating next: {next:?}");
+        Ok(next)
+    }
+
+    fn start_catch(&mut self, _mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::Catch;
+
+        let app = expect!(self.spine.pop());
+        let next = unpack_arg(app, 0, comb)?;
+
+        debug_assert!(
+            self.spine.peek(0).is_ok_and(|app| app.unpack().is_app()),
+            "spine should have second argument of {comb}, instead of {:?}",
+            self.spine.peek(0),
+        );
+
+        let watermark = self.spine.save();
+        let strict_index = self.strict_context.len();
+
+        let io = IO::Catch {
+            watermark,
+            strict_index,
+        };
+        self.io_context.push(io);
+        log::trace!(
+            "==> {comb} context saved ({io:?}), along with handler: {:?}",
+            unpack_arg(self.spine.peek(0).unwrap(), 1, comb),
+        );
+        log::trace!("    Evaluating next: {next:?}");
+        Ok(next)
     }
 
     fn handle_from_utf8(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
@@ -721,12 +771,12 @@ impl<'gc> State<'gc> {
             Combinator::PSub => self.handle_binop(mc, comb, ForeignPtr::psub),
 
             Combinator::Return => self.handle_unop(mc, comb, |v: Value<'_>| v),
-            Combinator::Bind => self.start_io(mc, IO::Bind { cc: false }),
-            Combinator::CCBind => self.start_io(mc, IO::Bind { cc: true }),
-            Combinator::Then => self.start_io(mc, IO::Then),
-            Combinator::PerformIO => self.start_io(mc, IO::Perform),
+            Combinator::Bind => self.start_bind(mc, IO::Bind { cc: false }),
+            Combinator::CCBind => self.start_bind(mc, IO::Bind { cc: true }),
+            Combinator::Then => self.start_bind(mc, IO::Then),
+            Combinator::PerformIO => self.start_performio(mc),
+            Combinator::Catch => self.start_catch(mc),
 
-            Combinator::Catch => todo!("{comb:?}: need to save stack state"),
             Combinator::DynSym => todo!("{comb:?}: dynamic FFI"),
 
             Combinator::Serialize => unimplemented!("serialization not supported"),
