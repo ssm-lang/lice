@@ -16,7 +16,9 @@ use quote::quote;
 use syn::{parse_macro_input, DeriveInput};
 
 fn identifier(i: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| is_alphanumeric(c as u8) || c == '_' || c == '\'')(i)
+    take_while1(|c: char| is_alphanumeric(c as u8) || c == '_' || c == '\'' || c == '*' || c == ':')(
+        i,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +165,7 @@ struct ReduceVariant {
     /// Specifies the return type when reducing the combinator
     ///
     /// Only used for documentation purposes. Should not overlap with `to`.
-    returns: Option<SpannedValue<String>>,
+    to_io: Option<SpannedValue<String>>,
     /// Specifies that the combinator reduces without any arguments.
     ///
     /// Should not overlap with `from`.
@@ -188,12 +190,12 @@ impl ReduceVariant {
         if let Some(from) = &self.from {
             from.check().map_err(|e| e.with_span(&from.span()))?;
             if let Some(to) = &self.to {
-                if let Some(returns) = &self.returns {
+                if let Some(to_io) = &self.to_io {
                     return Err(darling::Error::custom(
-                        "'to' and 'returns' cannot both be defined'".to_string(),
+                        "'to' and 'to_io' cannot both be defined'".to_string(),
                     )
                     .with_span(&to.span())
-                    .with_span(&returns.span()));
+                    .with_span(&to_io.span()));
                 }
                 to.check(from).map_err(|e| e.with_span(&to.span()))?;
             }
@@ -254,6 +256,15 @@ impl ReduceEnum {
             }
         });
 
+        let io_action = variants.iter().map(|v| {
+            let variant = &v.ident;
+            if v.to_io.is_some() {
+                quote!(#ident::#variant => true)
+            } else {
+                quote!(#ident::#variant => false)
+            }
+        });
+
         Ok(quote! {
             impl crate::combinator::Reduce for #ident {
                 #[inline]
@@ -267,6 +278,12 @@ impl ReduceEnum {
                 fn redux(&self) -> Option<&'static [crate::combinator::ReduxCode]> {
                     match self {
                         #(#reduxes),*
+                    }
+                }
+                #[inline]
+                fn io_action(&self) -> bool {
+                    match self {
+                        #(#io_action),*
                     }
                 }
             }

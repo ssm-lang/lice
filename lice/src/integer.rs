@@ -1,3 +1,4 @@
+use crate::memory::{FromValue, IntoValue};
 use core::{
     char,
     fmt::Display,
@@ -5,7 +6,7 @@ use core::{
 };
 use gc_arena::Collect;
 
-#[derive(Debug, Clone, Copy, Collect, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Collect, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 #[collect(require_static)]
 pub struct Integer(usize);
@@ -14,6 +15,10 @@ impl Display for Integer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
+}
+
+impl<'gc> FromValue<'gc> for Integer {
+    from_gc_value!(Integer);
 }
 
 macro_rules! op {
@@ -106,16 +111,11 @@ impl Integer {
 
 macro_rules! impl_convert_value {
     ($ty:ty) => {
-        impl TryFrom<crate::memory::Value<'_>> for $ty {
-            type Error = &'static str;
-            fn try_from(value: crate::memory::Value<'_>) -> Result<Self, Self::Error> {
-                Ok(Integer::try_from(value)?.into())
-            }
+        impl<'gc> FromValue<'gc> for $ty {
+            from_gc_value!(Integer);
         }
-        impl<'gc> From<$ty> for crate::memory::Value<'gc> {
-            fn from(value: $ty) -> crate::memory::Value<'gc> {
-                Integer::from(value).into()
-            }
+        impl<'gc> IntoValue<'gc> for $ty {
+            into_gc_value!(Integer);
         }
     };
 }
@@ -165,19 +165,8 @@ impl From<Integer> for char {
         let Ok(value) = u32::try_from(value.0) else {
             return Default::default();
         };
+        // FIXME: this conversion is actually fallible
         char::from_u32(value).unwrap_or_default()
     }
 }
 impl_convert_value!(char);
-
-// impl From<bool> for Integer {
-//     fn from(value: bool) -> Self {
-//         Self(if value { 1 } else { 0 })
-//     }
-// }
-// impl From<Integer> for bool {
-//     fn from(value: Integer) -> Self {
-//         value.0 != 0
-//     }
-// }
-// impl_convert_value!(bool);

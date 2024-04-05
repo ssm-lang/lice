@@ -7,9 +7,9 @@ set -eu
 MHS="bin/gmhs"
 
 root="$(git rev-parse --show-toplevel)"
-
 cd "$root"
 
+# MicroHs does not seem to like being run from an external directory
 cd MicroHs || exit 1
 make "$MHS"
 
@@ -21,6 +21,7 @@ compile() {
   file="${indir}/${module/.//}.hs"
   echo -n "Compiling MicroHs/$file to $out... "
 
+  rm -f "../combs/$out" "../combs/$out.mhserr"
   set +e
   if "$MHS" "-i$indir" "$module" "-o../combs/$out" >"../combs/$out.mhserr" 2>&1 ; then
     echo "OK"
@@ -33,14 +34,18 @@ compile() {
 }
 
 mkdir -p ../combs
-rm -rf ../combs/*
-
-compile Example .
 
 for test in tests/*.hs ; do
-  hs="${test#*/}"
+  hs="${test##*/}"
   module="${hs%.hs}"
   compile "$module" tests
 done
 
+for program in ../hs/*.hs ; do
+  hs="${program##*/}"
+  module="${hs%.hs}"
+  compile "$module" ../hs
+done
+
+compile Example .
 compile MicroHs.Main src mhs.comb

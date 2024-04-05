@@ -1,4 +1,6 @@
-use gc_arena::Collect;
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, gc_arena::Collect)]
+#[collect(require_static)]
+pub struct Tick(usize);
 
 #[derive(Debug, Default, Clone)]
 pub struct TickInfo {
@@ -15,7 +17,7 @@ impl TickInfo {
     }
 }
 
-#[derive(Debug, Default, Clone, Collect)]
+#[derive(Debug, Default, Clone, gc_arena::Collect)]
 #[collect(require_static)]
 pub struct TickTable {
     table: Vec<TickInfo>,
@@ -26,7 +28,7 @@ impl TickTable {
         Default::default()
     }
 
-    pub(crate) fn find_entry(&self, name: &str) -> Option<Tick> {
+    fn find_entry(&self, name: &str) -> Option<Tick> {
         Some(Tick(
             self.table
                 .iter()
@@ -39,12 +41,20 @@ impl TickTable {
     pub(crate) fn add_entry(&mut self, name: &str) -> Tick {
         self.find_entry(name).unwrap_or_else(|| {
             self.table.push(TickInfo::new(name));
-            Tick(self.table.len() - 1)
+            let index = self.table.len() - 1;
+            log::debug!("added tick: {} (index = {})", name, index);
+            Tick(index)
         })
     }
 
-    pub(crate) fn tick(&mut self, tick: Tick) {
-        self.table[tick.0].count += 1;
+    pub(crate) fn tick(&mut self, tick: Tick) -> Result<&TickInfo, TickError> {
+        let entry = self
+            .table
+            .get_mut(tick.0)
+            .ok_or(TickError::MissingEntry(tick.0))?;
+        entry.count += 1;
+        log::info!("encountered tick: {} = {}", entry.name, entry.count);
+        Ok(entry)
     }
 
     pub(crate) fn info(&self, tick: Tick) -> &TickInfo {
@@ -52,6 +62,8 @@ impl TickTable {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Collect)]
-#[collect(require_static)]
-pub struct Tick(usize);
+#[derive(Debug, thiserror::Error)]
+pub enum TickError {
+    #[error("could not find tick entry at index {0}")]
+    MissingEntry(usize),
+}

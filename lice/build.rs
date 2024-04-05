@@ -2,9 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    cc::Build::new()
-        .file("bfile.c")
-        .compile("bfile");
+    cc::Build::new().file("bfile.c").compile("bfile");
     println!("cargo:rustc-link-lib=bfile");
 
     bindgen::Builder::default()
