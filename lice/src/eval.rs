@@ -792,11 +792,11 @@ mod tests {
         }); // tip points to ((* ((+ 40) 2)) 10)
         arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (* ((+ 40) 2))
         arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to *
-        arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce *, tip points to ((+ 40) 2)
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // start strict *, tip points to ((+ 40) 2)
         arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to (+ 40)
         arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to +
         arena.mutate_root(|mc, (st, _)| st.step(mc)); // reduce +, tip points to 42
-        arena.mutate_root(|mc, (st, _)| st.step(mc)); // tip points to result 420
+        arena.mutate_root(|mc, (st, _)| st.step(mc)); // resume strict *, tip points to result 420
         arena.mutate(|_, (st, top)| {
             assert_eq!(st.tip, *top, "tip is back at top");
             assert_eq!(
