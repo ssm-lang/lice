@@ -9,3 +9,6 @@ Cargo.lock
 *.comb
 .mhsi
 Interactive.hs
+
+# Lennart's test case generates this...
+unicode.tmp
