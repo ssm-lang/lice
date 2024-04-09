@@ -88,10 +88,14 @@ impl Reduce for Operator {
 
 #[derive(thiserror::Error, Debug)]
 pub enum SpineError {
-    #[error("could not pop, spine empty")]
-    NoPop,
-    #[error("could not peek, index {0} is out of bounds")]
-    NoPeek(usize),
+    #[error("could not pop empty spine (watermark={watermark})")]
+    NoPop { watermark: usize },
+    #[error("could not peek index {index} (watermark={watermark}, size={size})")]
+    NoPeek {
+        index: usize,
+        watermark: usize,
+        size: usize,
+    },
 }
 
 type VMResult<T> = Result<T, VMError>;
@@ -182,15 +186,30 @@ impl<'gc> Spine<'gc> {
 
     fn pop(&mut self) -> Result<Pointer<'gc>, SpineError> {
         self.check_invariant();
-        // FIXME: check watermark too
-        self.stack.pop().ok_or(SpineError::NoPop)
+        if self.has_args(1) {
+            Ok(expect!(
+                self.stack.pop(),
+                "has_args() should have checked the args"
+            ))
+        } else {
+            Err(SpineError::NoPop {
+                watermark: self.watermark,
+            })
+        }
     }
 
-    fn peek(&self, idx: usize) -> Result<Pointer<'gc>, SpineError> {
+    fn peek(&self, index: usize) -> Result<Pointer<'gc>, SpineError> {
         self.check_invariant();
-        let idx = self.stack.len() - 1 - idx;
-        // FIXME: check watermark too
-        self.stack.get(idx).cloned().ok_or(SpineError::NoPeek(idx))
+        if self.has_args(index) {
+            let index = self.stack.len() - 1 - index;
+            Ok(expect!(self.stack.get(index).cloned()))
+        } else {
+            Err(SpineError::NoPeek {
+                index,
+                watermark: self.watermark,
+                size: self.stack.len(),
+            })
+        }
     }
 
     fn save(&mut self) -> usize {
@@ -200,11 +219,27 @@ impl<'gc> Spine<'gc> {
         prev
     }
 
-    fn restore(&mut self, prev: usize) {
+    fn restore(&mut self, watermark: usize) {
         self.check_invariant();
         self.stack.truncate(self.watermark);
-        self.watermark = prev;
+        self.watermark = watermark;
         self.check_invariant();
+    }
+
+    fn reset(&mut self, watermark: usize, size: usize) {
+        self.check_invariant();
+        self.stack.truncate(watermark + size);
+        self.watermark = watermark;
+        self.check_invariant();
+    }
+}
+
+impl<'gc> Debug for Spine<'gc> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Spine")
+            .field("size", &self.stack.len())
+            .field("watermark", &self.watermark)
+            .finish()
     }
 }
 
@@ -233,7 +268,7 @@ impl Debug for StrictWork {
 impl StrictWork {
     const MAX_ARGS: usize = 4;
 
-    #[instrument(skip(mc, op, spine), level = "trace")]
+    #[instrument(skip(mc, op), level = "trace")]
     fn init<'gc>(
         mc: &Mutation<'gc>,
         op: Operator,
@@ -301,13 +336,23 @@ impl StrictWork {
     }
 
     /// Advance the pending arg state.
-    #[instrument(skip(self, mc, spine), level = "trace")]
+    #[instrument(skip(self, mc), level = "trace")]
     fn advance<'gc>(
         &mut self,
         mc: &Mutation<'gc>,
         spine: &mut Spine<'gc>,
     ) -> VMResult<Option<Pointer<'gc>>> {
         tracing::trace!("Resuming {self:?}");
+
+        // Need to do this to peek at spine. Hopefully this will get optimized away?
+        spine.restore(self.watermark);
+        debug_assert!(
+            spine.has_args(self.op.strictness().len()),
+            "spine should have at least {} arguments while performing strict work for {}",
+            self.op.strictness().len(),
+            self.op
+        );
+
         debug_assert!(!self.args[0], "index 0 should never be set");
         for idx in 1..Self::MAX_ARGS {
             if self.args[idx] {
@@ -316,6 +361,11 @@ impl StrictWork {
                 let arg = unpack_arg(app, idx, self.op)?.forward(mc);
                 if !arg.unpack().whnf() {
                     tracing::trace!("..... Arg {idx} will be evaluated next: {arg:?}");
+                    let _watermark = spine.save();
+                    debug_assert_eq!(
+                        self.watermark, _watermark,
+                        "watermark should not have changed while advancing strict work"
+                    );
                     return Ok(Some(arg));
                 }
                 tracing::trace!(
@@ -324,13 +374,7 @@ impl StrictWork {
             }
         }
         tracing::trace!("Done, all {} arguments in WHNF", self.op.arity());
-        spine.restore(self.watermark);
-        debug_assert!(
-            spine.has_args(self.op.strictness().len()),
-            "spine should have at least {} arguments when starting strict work for {}",
-            self.op.strictness().len(),
-            self.op
-        );
+
         Ok(None)
     }
 }
@@ -344,9 +388,11 @@ pub enum IO {
     Then,
     Perform,
     Catch {
-        /// Spine state
+        /// Spine watermark
         watermark: usize,
-        /// Strict evaluation context??
+        /// Spine size
+        size: usize,
+        /// Strict evaluation context
         strict_index: usize,
     },
 }
@@ -497,15 +543,23 @@ impl<'gc> State<'gc> {
             match io {
                 IO::Catch {
                     watermark,
+                    size,
                     strict_index,
                 } => {
                     self.spine.restore(watermark);
                     debug_assert!(
+                        self.spine.size() == size,
+                        "size should be where it was before"
+                    );
+                    debug_assert!(
                         self.strict_context.len() == strict_index,
                         "strict index should still be where it was before"
                     );
-                    let _handler = self.spine.pop().expect("TODO");
-                    tracing::trace!("==> Popped IO.catch context with handler: {_handler:?}");
+                    let _handler = expect!(self.spine.pop(), "handler ");
+                    tracing::trace!(
+                        "==> Popped IO.catch context with handler: {handler:?}",
+                        handler = expect!(unpack_arg(_handler, 1, Combinator::Catch)),
+                    );
                 }
                 _ => break io,
             }
@@ -654,26 +708,28 @@ impl<'gc> State<'gc> {
         let app = expect!(self.spine.pop());
         let next = unpack_arg(app, 0, comb)?;
 
-        // debug_assert!(
-        //     self.spine.peek(0).is_ok_and(|app| app.unpack().is_app()),
-        //     "spine should have second argument of {comb}, instead of {:?}",
-        //     self.spine.peek(0),
-        // );
-        let app = expect!(self.spine.pop());
-        let handler = unpack_arg(app, 1, comb)?;
-        self.spine.push(handler);
+        debug_assert!(
+            self.spine.peek(0).is_ok_and(|app| app.unpack().is_app()),
+            "spine should have second argument of {comb}, instead of {:?}",
+            self.spine.peek(0),
+        );
+        // let app = expect!(self.spine.pop());
+        // let handler = unpack_arg(app, 1, comb)?;
+        // self.spine.push(handler);
 
+        let size = self.spine.size();
         let watermark = self.spine.save();
         let strict_index = self.strict_context.len();
 
         let io = IO::Catch {
             watermark,
+            size,
             strict_index,
         };
         self.io_context.push(io);
         tracing::trace!(
             "==> {comb} context saved ({io:?}), along with handler: {handler:?}",
-            // unpack_arg(self.spine.peek(0).unwrap(), 1, comb),
+            handler = unpack_arg(self.spine.peek(0).unwrap(), 1, comb),
         );
         tracing::trace!("    Evaluating next: {next:?}");
         Ok(next)
@@ -685,6 +741,7 @@ impl<'gc> State<'gc> {
             io_index,
             IO::Catch {
                 watermark,
+                size,
                 strict_index,
             },
         )) = self
@@ -701,9 +758,10 @@ impl<'gc> State<'gc> {
             tracing::trace!("    Percolating exception to top-level");
             return Err(VMError::IOException(msg));
         };
-        let (watermark, strict_index) = (*watermark, *strict_index);
+        let (watermark, size, strict_index) = (*watermark, *size, *strict_index);
         let io = IO::Catch {
             watermark,
+            size,
             strict_index,
         };
         tracing::trace!("... Found IO context to restore: {io:?}");
@@ -712,10 +770,9 @@ impl<'gc> State<'gc> {
         self.io_context.truncate(io_index);
 
         self.strict_context.truncate(strict_index);
-        // FIXME: this is probably wrong. it is insufficient to just save the index.
-        // Must also save the state and restore the strict evaluation state.
-        self.spine.restore(watermark);
-        // Is the watermark thing wrong here?
+        self.spine.reset(watermark, size);
+        // Note that we must reset() rather than restore() here because we may need to pop off
+        // multiple watermarks worth of save()s.
 
         let handler = self
             .spine
@@ -724,7 +781,7 @@ impl<'gc> State<'gc> {
                 io: Combinator::Catch,
                 source,
             })?;
-        // let handler = unpack_arg(handler, 1, Combinator::Catch)?;
+        let handler = unpack_arg(handler, 1, Combinator::Catch)?;
         tracing::trace!("... With handler: {handler:?}");
         let next = Pointer::new(
             mc,
