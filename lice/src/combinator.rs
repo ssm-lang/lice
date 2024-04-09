@@ -102,14 +102,21 @@ pub enum Combinator {
     Rnf,
     /// Bottom value, throws an exception with the Haskell string as the error message.
     #[display("error")]
-    #[reduce(from = "!msg")]
+    #[reduce(from = "msg")]
     ErrorMsg,
-    /// Bottom value, throws an exception with the Haskell string as the error message.
+    /// Throws an exception when there is no default instance for some class.
+    ///
+    /// The `msg` argument is supposed to be a Haskell `String`, but is typically `fromUTF8`
+    /// applied to a string literal.
     #[display("noDefault")]
-    #[reduce(from = "!msg")]
+    #[reduce(from = "msg")]
     NoDefault,
+    /// Throws an exception when there is an incomplete pattern-match.
+    ///
+    /// The `msg` argument is supposed to be a Haskell `String`, but is typically `fromUTF8`
+    /// applied to a string literal.
     #[display("noMatch")]
-    #[reduce(from = "!msg !line_nr !col_nr")]
+    #[reduce(from = "msg !line_nr !col_nr")]
     NoMatch,
 
     /** Comparisons **/

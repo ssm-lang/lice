@@ -8,7 +8,6 @@ use crate::{combinator::Combinator, integer::Integer};
 use core::fmt::Debug;
 use core::{cell::Cell, ops};
 use gc_arena::{barrier::Unlock, lock::Lock, static_collect, Collect, Gc, Mutation};
-use log::debug;
 
 /// A node in the combinator graph.
 ///
@@ -193,21 +192,15 @@ impl<'gc> Debug for Pointer<'gc> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("Pointer")
             .field(&Gc::as_ptr(self.ptr))
-            .field(self.ptr.as_ref())
+            .field(&self.ptr.as_ref().unpack())
             .finish()
     }
 }
 
 impl<'gc> Pointer<'gc> {
-    #[track_caller]
+    #[tracing::instrument(skip(mc, value), fields(T = std::any::type_name::<T>()), ret)]
     pub fn new<T: IntoValue<'gc>>(mc: &Mutation<'gc>, value: T) -> Self {
-        let ptr = Gc::new(mc, Node::from(value.into_value(mc))).into();
-        debug!(
-            "{}: Pointer::new({}) => {ptr:?}",
-            std::panic::Location::caller(),
-            core::any::type_name::<T>()
-        );
-        ptr
+        Gc::new(mc, Node::from(value.into_value(mc))).into()
     }
 
     pub fn set<T: IntoValue<'gc>>(&self, mc: &Mutation<'gc>, value: T) {
@@ -331,7 +324,9 @@ impl crate::file::Program {
                     Expr::Array(_, _) => todo!("arrays"),
                     Expr::Unknown(s) => panic!("unable to deserialize {s}"),
                 },
-            )
+            );
+            log::trace!("*** Initialized from expr #{i}: {expr}");
+            log::trace!("    {:?}", heap[i]);
         }
 
         heap[self.root]

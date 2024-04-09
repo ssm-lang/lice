@@ -4,13 +4,17 @@ use crate::{
     float::{FShow, Float},
     integer::Integer,
     memory::{App, ConversionError, FromValue, IntoValue, Pointer, Value},
-    string::{eval_hstring, new_castringlen, peek_castring, peek_castringlen},
+    string::{
+        eval_hstring, hstring_from_utf8, new_castringlen, peek_castring, peek_castringlen,
+        read_hstring,
+    },
     tick::{Tick, TickError, TickInfo, TickTable},
 };
 use bitvec::prelude::*;
 use core::{cell::OnceCell, fmt::Debug};
 use debug_unwraps::DebugUnwrapExt;
 use gc_arena::{Arena, Collect, Mutation, Rootable};
+use tracing::instrument;
 
 /// Shorthand for my tomfoolery
 macro_rules! expect {
@@ -33,6 +37,25 @@ fn unpack_arg(app: Pointer<'_>, index: usize, op: impl Into<Operator>) -> VMResu
             got: value.into(),
         })
     }
+}
+
+fn probably_string(s: Pointer<'_>) -> Option<String> {
+    if let Ok(App { fun, arg }) = s.unpack().try_unwrap_app() {
+        if fun
+            .unpack()
+            .try_unwrap_combinator()
+            .is_ok_and(|c| c == Combinator::FromUtf8)
+        {
+            let s = arg
+                .unpack()
+                .try_unwrap_string()
+                .expect("NoMatch FromUTF8 Type Error?")
+                .to_string();
+            return Some(s);
+        }
+    }
+    let bytes = read_hstring(s)?;
+    Some(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[derive(Debug, Clone, Copy, derive_more::From, parse_display::Display)]
@@ -74,10 +97,35 @@ pub enum SpineError {
 type VMResult<T> = Result<T, VMError>;
 
 /// Tidy this up, consolidate some of the errors and consider using `anyhow`.
+///
+/// NOTE: there are three sources of errors:
+/// (1) runtime errors thrown by the user program,
+/// (2) miscompilation from MicroHs, and
+/// (3) lice implementation bugs.
+///
+/// We should always just panic with a readable backtrace for (2) and (3).
+///
+/// Also, maybe `VMError` should carry a lifetime parameter so that it can hold arbitrary VM
+/// `Pointer`s.
 #[derive(thiserror::Error, Debug)]
 pub enum VMError {
+    /*** User errors ***/
     #[error("IO monad terminated with constant value {0}")]
     IOTerminated(Combinator),
+    #[error("IO monad threw exception with message: {0}")]
+    IOException(String),
+    #[error("IO monad did not return value after {0} steps")]
+    IOIncomplete(usize),
+    #[error("missing FFI symbol: {0}")]
+    BadDyn(String),
+
+    /*** Lennart and John errors ***/
+    #[error("arg {index} of {op} it not the right type")]
+    TypeError {
+        op: Operator,
+        index: usize,
+        source: ConversionError,
+    },
     #[error("no IO context to handle {0}")]
     IONoContext(&'static str),
     #[error("could not resume {io}, no continuation found")]
@@ -88,12 +136,6 @@ pub enum VMError {
         index: usize,
         got: &'static str,
     },
-    #[error("arg {index} of {op} it not the right type")]
-    TypeError {
-        op: Operator,
-        index: usize,
-        source: ConversionError,
-    },
     #[error("evaluated to unexpected value without strict context: {0}")]
     UnexpectedValue(&'static str),
     #[error(transparent)]
@@ -102,10 +144,6 @@ pub enum VMError {
     TickResume { tick: TickInfo, source: SpineError },
     #[error("could not resume after tick {tick:?}")]
     TickNotApp { tick: TickInfo, got: &'static str },
-    #[error("missing FFI symbol: {0}")]
-    BadDyn(String),
-    #[error("IO monad did not return value after {0} steps")]
-    IOIncomplete(usize),
 }
 
 /// INVARIANT: At all times, `watermark <= stack.len()`.
@@ -164,7 +202,7 @@ impl<'gc> Spine<'gc> {
 
     fn restore(&mut self, prev: usize) {
         self.check_invariant();
-        self.stack.drain(self.watermark..);
+        self.stack.truncate(self.watermark);
         self.watermark = prev;
         self.check_invariant();
     }
@@ -195,15 +233,13 @@ impl Debug for StrictWork {
 impl StrictWork {
     const MAX_ARGS: usize = 4;
 
+    #[instrument(skip(mc, op, spine), level = "trace")]
     fn init<'gc>(
         mc: &Mutation<'gc>,
         op: Operator,
         spine: &mut Spine<'gc>,
     ) -> VMResult<Option<(Self, Pointer<'gc>)>> {
-        log::trace!(
-            "Evaluated tip to {op}, checking whether {} arguments need to be evaluated.",
-            op.arity()
-        );
+        tracing::trace!("Checking {} arguments for WHNF", op.arity());
         debug_assert!(
             spine.has_args(op.strictness().len()),
             "spine should have at least {} arguments when starting strict work for {op}",
@@ -227,7 +263,7 @@ impl StrictWork {
                         "argument {idx} of {op} should be an app node, but it was {arg:?}"
                     );
                 }
-                log::trace!("..... Arg {idx} is not strict, no need to check");
+                tracing::trace!("... Arg {idx} is not strict, no need to check");
                 continue;
             }
             let app = expect!(spine.peek(idx)).forward(mc);
@@ -240,9 +276,9 @@ impl StrictWork {
                     // is evaluated, so we mark it as such:
                     args.set(idx, true);
                 }
-                log::trace!("..... Arg {idx} is strict and not already in WHNF: {arg:?}");
+                tracing::trace!("... Arg {idx} is strict and not already in WHNF: {arg:?}");
             } else {
-                log::trace!("..... Arg {idx} is strict, but already in WHNF: {arg:?}");
+                tracing::trace!("... Arg {idx} is strict, but already in WHNF: {arg:?}");
             }
         }
 
@@ -255,22 +291,23 @@ impl StrictWork {
                 args,
                 watermark,
             };
-            log::trace!("==> Next, evaluating argument {first} of {op}: {next:?}");
-            log::trace!("    with pending work {work:?}");
+            tracing::trace!("==> Next, evaluating argument {first} of {op}: {next:?}");
+            tracing::trace!("    with pending work {work:?}");
             Ok(Some((work, next)))
         } else {
-            log::trace!("... No arguments of {op} need to be evaluated");
+            tracing::trace!("No arguments of {op} need to be evaluated");
             Ok(None)
         }
     }
 
     /// Advance the pending arg state.
+    #[instrument(skip(self, mc, spine), level = "trace")]
     fn advance<'gc>(
         &mut self,
         mc: &Mutation<'gc>,
         spine: &mut Spine<'gc>,
     ) -> VMResult<Option<Pointer<'gc>>> {
-        log::trace!("... Resuming {:?}", self);
+        tracing::trace!("Resuming {self:?}");
         debug_assert!(!self.args[0], "index 0 should never be set");
         for idx in 1..Self::MAX_ARGS {
             if self.args[idx] {
@@ -278,18 +315,15 @@ impl StrictWork {
                 let app = expect!(spine.peek(idx)).forward(mc);
                 let arg = unpack_arg(app, idx, self.op)?.forward(mc);
                 if !arg.unpack().whnf() {
-                    log::trace!("..... Arg {idx} will be evaluated next: {arg:?}");
+                    tracing::trace!("..... Arg {idx} will be evaluated next: {arg:?}");
                     return Ok(Some(arg));
                 }
-                log::trace!(
+                tracing::trace!(
                     "..... Arg {idx} was previously scheduled, but it is now in WHNF: {arg:?}"
                 );
             }
         }
-        log::trace!(
-            "... No more work needs to be done, all {} arguments in WHNF",
-            self.op.arity()
-        );
+        tracing::trace!("Done, all {} arguments in WHNF", self.op.arity());
         spine.restore(self.watermark);
         debug_assert!(
             spine.has_args(self.op.strictness().len()),
@@ -301,7 +335,7 @@ impl StrictWork {
     }
 }
 
-#[derive(Clone, Copy, Collect, Debug)]
+#[derive(Clone, Copy, Collect, Debug, derive_more::IsVariant)]
 #[collect(require_static)]
 pub enum IO {
     Bind {
@@ -367,9 +401,9 @@ impl<'gc> State<'gc> {
             index,
             source,
         })?;
-        log::trace!(
-            "..... Popped argument {index} of type {} from spine: {arg:?}",
-            core::any::type_name::<T>()
+        tracing::trace!(
+            "Popped argument {index} of type {} from spine: {arg:?}",
+            core::any::type_name::<T>(),
         );
         Ok((app, arg))
     }
@@ -395,8 +429,8 @@ impl<'gc> State<'gc> {
     /// happens either.
     #[inline(always)]
     #[track_caller]
+    #[instrument(skip(self, mc), level = "trace")]
     fn do_redux(&mut self, mc: &Mutation<'gc>, comb: Combinator) -> VMResult<Pointer<'gc>> {
-        log::trace!("... Performing reduction for {comb:?}");
         debug_assert!(
             self.spine.has_args(comb.strictness().len()),
             "spine should have at least {} arguments when starting strict work for {comb}",
@@ -413,7 +447,7 @@ impl<'gc> State<'gc> {
             let arg = unpack_arg(app, index, comb)?;
             expect!(args.push(arg));
             top = app;
-            log::trace!("..... Argument {index}: {arg:?}");
+            tracing::trace!("... Argument {index}: {arg:?}");
         }
 
         for b in &code[..code.len() - 1] {
@@ -445,14 +479,15 @@ impl<'gc> State<'gc> {
             stk.is_empty(),
             "{comb} redux code not well-formed: stack should be empty after reduction"
         );
-        log::trace!("==> Reduced to {next:?}");
+        tracing::trace!("==> Reduced to {next:?}");
         Ok(next)
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
     fn resume_io(&mut self, mc: &Mutation<'gc>, value: Pointer<'gc>) -> VMResult<Pointer<'gc>> {
         let io = loop {
             let Some(io) = self.io_context.pop() else {
-                log::trace!("==> No IO context to handle {value:?}");
+                tracing::trace!("==> No IO context to handle {value:?}");
                 return Err(value.follow().unpack().try_unwrap_combinator().map_or_else(
                     |v| VMError::IONoContext(v.input.into()), // terminated with non-combinator value
                     VMError::IOTerminated,                    // terminated with combinator constant
@@ -470,7 +505,7 @@ impl<'gc> State<'gc> {
                         "strict index should still be where it was before"
                     );
                     let _handler = self.spine.pop().expect("TODO");
-                    log::trace!("==> Popped IO.catch context with handler: {_handler:?}");
+                    tracing::trace!("==> Popped IO.catch context with handler: {_handler:?}");
                 }
                 _ => break io,
             }
@@ -502,25 +537,27 @@ impl<'gc> State<'gc> {
             }
             IO::Catch { .. } => unreachable!("{io:?} should have been handled in loop"),
         };
-        log::trace!("==> Resuming in {io:?} context with continuation {continuation:?}");
+        tracing::trace!("==> Resuming in {io:?} context with continuation {continuation:?}");
         Ok(next)
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
     fn resume_pure(
         &mut self,
         mc: &Mutation<'gc>,
         next: Pointer<'gc>,
-        value: impl IntoValue<'gc>,
+        value: impl IntoValue<'gc> + Debug,
     ) -> VMResult<Pointer<'gc>> {
         next.set(mc, value);
-        log::trace!("==> Resuming in pure context with next {next:?}");
+        tracing::trace!("==> Resuming in pure context with next {next:?}");
         Ok(next)
     }
 
+    #[instrument(skip(self, mc, handler), level = "trace")]
     fn handle_unop<P, R>(
         &mut self,
         mc: &Mutation<'gc>,
-        op: impl Into<Operator>,
+        op: impl Into<Operator> + Debug,
         handler: impl FnOnce(P) -> R,
     ) -> VMResult<Pointer<'gc>>
     where
@@ -532,7 +569,7 @@ impl<'gc> State<'gc> {
 
         let (top, arg0) = self.pop_arg::<P>(mc, 0, op)?;
         let value = handler(arg0).into_value(mc);
-        log::trace!(
+        tracing::trace!(
             "... {op} returned value of type {}: {value:?}",
             core::any::type_name::<R>()
         );
@@ -544,10 +581,11 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[instrument(skip(self, mc, handler), level = "trace")]
     fn handle_binop<P, Q, R>(
         &mut self,
         mc: &Mutation<'gc>,
-        op: impl Into<Operator>,
+        op: impl Into<Operator> + Debug,
         handler: impl FnOnce(P, Q) -> R,
     ) -> VMResult<Pointer<'gc>>
     where
@@ -561,7 +599,7 @@ impl<'gc> State<'gc> {
         let (_, arg0) = self.pop_arg::<P>(mc, 0, op)?;
         let (top, arg1) = self.pop_arg::<Q>(mc, 1, op)?;
         let value = handler(arg0, arg1).into_value(mc);
-        log::trace!(
+        tracing::trace!(
             "... {op} returned value of type {}: {value:?}",
             core::any::type_name::<R>()
         );
@@ -573,6 +611,7 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
     fn start_bind(&mut self, mc: &Mutation<'gc>, io: IO) -> VMResult<Pointer<'gc>> {
         let comb = Combinator::from(io);
 
@@ -592,8 +631,8 @@ impl<'gc> State<'gc> {
         }
 
         self.io_context.push(io);
-        log::trace!("==> {io:?} context saved, with continuation {continuation:?}");
-        log::trace!("    Evaluating next: {next:?}");
+        tracing::trace!("==> {io:?} context saved, with continuation {continuation:?}");
+        tracing::trace!("    Evaluating next: {next:?}");
         Ok(next)
     }
 
@@ -604,8 +643,8 @@ impl<'gc> State<'gc> {
         let next = unpack_arg(top, 0, comb)?;
 
         self.io_context.push(IO::Perform);
-        log::trace!("==> {comb} context saved, will overwrite {top:?}");
-        log::trace!("    Evaluating next: {next:?}");
+        tracing::trace!("==> {comb} context saved, will overwrite {top:?}");
+        tracing::trace!("    Evaluating next: {next:?}");
         Ok(next)
     }
 
@@ -615,11 +654,14 @@ impl<'gc> State<'gc> {
         let app = expect!(self.spine.pop());
         let next = unpack_arg(app, 0, comb)?;
 
-        debug_assert!(
-            self.spine.peek(0).is_ok_and(|app| app.unpack().is_app()),
-            "spine should have second argument of {comb}, instead of {:?}",
-            self.spine.peek(0),
-        );
+        // debug_assert!(
+        //     self.spine.peek(0).is_ok_and(|app| app.unpack().is_app()),
+        //     "spine should have second argument of {comb}, instead of {:?}",
+        //     self.spine.peek(0),
+        // );
+        let app = expect!(self.spine.pop());
+        let handler = unpack_arg(app, 1, comb)?;
+        self.spine.push(handler);
 
         let watermark = self.spine.save();
         let strict_index = self.strict_context.len();
@@ -629,14 +671,113 @@ impl<'gc> State<'gc> {
             strict_index,
         };
         self.io_context.push(io);
-        log::trace!(
-            "==> {comb} context saved ({io:?}), along with handler: {:?}",
-            unpack_arg(self.spine.peek(0).unwrap(), 1, comb),
+        tracing::trace!(
+            "==> {comb} context saved ({io:?}), along with handler: {handler:?}",
+            // unpack_arg(self.spine.peek(0).unwrap(), 1, comb),
         );
-        log::trace!("    Evaluating next: {next:?}");
+        tracing::trace!("    Evaluating next: {next:?}");
         Ok(next)
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
+    fn throw_error(&mut self, mc: &Mutation<'gc>, msg: Pointer<'gc>) -> VMResult<Pointer<'gc>> {
+        let Some((
+            io_index,
+            IO::Catch {
+                watermark,
+                strict_index,
+            },
+        )) = self
+            .io_context
+            .iter()
+            .enumerate()
+            .rfind(|(_index, io)| io.is_catch())
+        else {
+            let msg = read_hstring(msg).map_or_else(
+                || format!("[[{msg:?}]]"),
+                |bytes| String::from_utf8_lossy(&bytes).to_string(),
+            );
+            tracing::trace!("==> No IO::Catch context found to handle error: {msg}");
+            tracing::trace!("    Percolating exception to top-level");
+            return Err(VMError::IOException(msg));
+        };
+        let (watermark, strict_index) = (*watermark, *strict_index);
+        let io = IO::Catch {
+            watermark,
+            strict_index,
+        };
+        tracing::trace!("... Found IO context to restore: {io:?}");
+
+        // Pop off any accumulated context and restore spine to previous position
+        self.io_context.truncate(io_index);
+
+        self.strict_context.truncate(strict_index);
+        // FIXME: this is probably wrong. it is insufficient to just save the index.
+        // Must also save the state and restore the strict evaluation state.
+        self.spine.restore(watermark);
+        // Is the watermark thing wrong here?
+
+        let handler = self
+            .spine
+            .pop()
+            .map_err(|source| VMError::IONoContinuation {
+                io: Combinator::Catch,
+                source,
+            })?;
+        // let handler = unpack_arg(handler, 1, Combinator::Catch)?;
+        tracing::trace!("... With handler: {handler:?}");
+        let next = Pointer::new(
+            mc,
+            App {
+                fun: handler,
+                arg: msg,
+            },
+        );
+        tracing::trace!("==> Resuming execution with applied handler: {next:?}");
+        Ok(next)
+    }
+
+    #[instrument(skip(self, mc), level = "trace")]
+    fn eval_nomatch(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::NoMatch;
+        let app = expect!(self.spine.pop()).forward(mc);
+        let loc = unpack_arg(app, 0, comb)?.forward(mc);
+        let loc = probably_string(loc).unwrap_or_else(|| format!("[[{loc:?}]]"));
+
+        let (_, line) = self.pop_arg::<usize>(mc, 1, comb.into())?;
+        let (_, col) = self.pop_arg::<usize>(mc, 2, comb.into())?;
+
+        let msg = format!("no match at {loc}, line {line}, col {col}");
+        // let msg = "no match".to_string();
+
+        tracing::trace!("Throwing NoMatch error with message: {msg}");
+        self.throw_error(mc, Pointer::new(mc, hstring_from_utf8(mc, &msg)))
+    }
+
+    #[instrument(skip(self, mc), level = "trace")]
+    fn eval_nodefault(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::NoDefault;
+        let app = expect!(self.spine.pop()).forward(mc);
+        let typename = unpack_arg(app, 0, comb)?.forward(mc);
+        let typename = probably_string(typename).unwrap_or_else(|| format!("[[{typename:?}]]"));
+
+        let msg = format!("no default for {typename}");
+        // let msg = "no default".to_string();
+
+        tracing::trace!("Throwing NoDefault error with message: {msg}");
+        self.throw_error(mc, Pointer::new(mc, hstring_from_utf8(mc, &msg)))
+    }
+
+    #[instrument(skip(self, mc), level = "trace")]
+    fn eval_error(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::ErrorMsg;
+        let app = expect!(self.spine.pop()).forward(mc);
+        let msg = unpack_arg(app, 0, comb)?.forward(mc);
+        tracing::trace!("Throwing error with message: {msg:?}");
+        self.throw_error(mc, msg)
+    }
+
+    #[instrument(skip(self, mc), level = "trace")]
     fn handle_from_utf8(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
         let comb = Combinator::FromUtf8;
         let (top, s) = self.pop_arg::<Value>(mc, 0, comb.into())?;
@@ -649,29 +790,31 @@ impl<'gc> State<'gc> {
             },
         })?;
         let res = crate::string::hstring_from_utf8(mc, s.as_ref());
-        log::trace!("... {comb:?} returned {res:?}");
+        tracing::trace!("... {comb:?} returned {res:?}");
         self.resume_pure(mc, top, res)
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
     fn handle_new_castring(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
         let comb = Combinator::CAStringLenNew;
         let top = expect!(self.spine.pop()).forward(mc);
         let s = unpack_arg(top, 0, comb)?.forward(mc);
 
         if let Some(cas) = new_castringlen(mc, s) {
-            log::trace!("... {comb:?} returned {cas:?}");
+            tracing::trace!("... {comb:?} returned {cas:?}");
             self.resume_io(mc, cas)
         } else {
             let new = Pointer::new(mc, comb);
             let again = Pointer::new(mc, App { fun: new, arg: s });
-            log::trace!("... {comb:?} arguments were not fully-evaluated, scheduling <$> seq before returning to {again:?}");
+            tracing::trace!("... {comb:?} arguments were not fully-evaluated, scheduling <$> seq before returning to {again:?}");
             self.resume_pure(mc, top, eval_hstring(mc, s, again))
         }
     }
 
     /// `next` has been reduced to the given combinator, with all strict arguments evaluated.
+    #[instrument(skip(self, mc), level = "trace")]
     fn eval_comb(&mut self, comb: Combinator, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
-        log::trace!("Handling combinator reduction: {comb:?}");
+        tracing::trace!("Handling combinator reduction: {comb:?}");
         debug_assert!(
             self.spine.has_args(comb.arity()),
             "spine should have at least {} arguments when evaluating {comb}",
@@ -702,9 +845,9 @@ impl<'gc> State<'gc> {
             | Combinator::Seq => self.do_redux(mc, comb),
 
             Combinator::Rnf => unimplemented!("RNF not implemented"),
-            Combinator::ErrorMsg => todo!("{comb:?}"),
-            Combinator::NoDefault => todo!("{comb:?}"),
-            Combinator::NoMatch => todo!("{comb:?}"),
+            Combinator::ErrorMsg => self.eval_error(mc),
+            Combinator::NoDefault => self.eval_nodefault(mc),
+            Combinator::NoMatch => self.eval_nomatch(mc),
 
             Combinator::Equal => todo!("{comb:?}"),
             Combinator::StrEqual => todo!("{comb:?}"),
@@ -802,8 +945,8 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
     fn eval_ffi(&mut self, ffi: FfiSymbol, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
-        log::trace!("Handling FFI call: {ffi}");
         debug_assert!(
             self.spine.has_args(ffi.arity()),
             "spine should have at least {} arguments when evaluating {ffi}",
@@ -847,14 +990,15 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
     fn start_strict(&mut self, op: Operator, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
         if !self.spine.has_args(op.arity()) {
-            log::trace!(
+            tracing::trace!(
                 "Evaluated tip to {op} (arity = {}), but spine only has {} arguments left",
                 op.arity(),
                 self.spine.size()
             );
-            log::trace!(
+            tracing::trace!(
                 "==> treating partially-applied {op} as a value and resuming strict evaluation."
             );
             return self.resume_strict(mc);
@@ -872,12 +1016,13 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
     fn resume_strict(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
         // `tip` has been reduced to a value, probably because some strict operator had
         // previously demanded strict arguments. We check our strict continuation context
         // to see if we still need to evaluate more arguments, or if we can now handle the
         // strict operator.
-        log::trace!("Evaluated tip to value {:?}", self.tip.unpack());
+        tracing::trace!("Evaluated tip to value {:?}", self.tip.unpack());
         let work = self
             .strict_context
             .last_mut()
@@ -895,6 +1040,7 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[instrument(skip(self), level = "trace")]
     fn handle_tick(&mut self, t: Tick) -> Result<Pointer<'gc>, VMError> {
         let tick = self.tick_table.tick(t)?;
         let app = self.spine.pop().map_err(|source| VMError::TickResume {
@@ -902,8 +1048,8 @@ impl<'gc> State<'gc> {
             source,
         })?;
         if let Value::App(App { fun: _, arg }) = app.unpack() {
-            log::trace!("  ! Handled tick: {tick:?}");
-            log::trace!("    and resuming execution at {arg:?}");
+            tracing::trace!("  ! Handled tick: {tick:?}");
+            tracing::trace!("    and resuming execution at {arg:?}");
             Ok(arg)
         } else {
             Err(VMError::TickNotApp {
@@ -913,26 +1059,31 @@ impl<'gc> State<'gc> {
         }
     }
 
-    fn step(&mut self, mc: &Mutation<'gc>) -> VMResult<()> {
-        // Tight loop for non-GC-allocating steps
+    /// Tight loop for small, non-GC-allocating steps.
+    #[instrument(skip(self, mc), level = "trace")]
+    fn shuffle(&mut self, mc: &Mutation<'gc>) -> VMResult<()> {
         loop {
             match self.tip.unpack() {
                 Value::App(App { fun, arg: _ }) => {
-                    log::trace!("  @ Pushing {:?} to spine", self.tip);
+                    tracing::trace!("  @ Pushing {:?} to spine", self.tip);
                     self.spine.push(self.tip);
                     self.tip = fun;
                 }
                 Value::Ref(_) => {
-                    log::trace!("  * Forwarding {:?}", self.tip);
+                    tracing::trace!("  * Forwarding {:?}", self.tip);
                     self.tip.forward(mc);
                 }
                 Value::Tick(t) => {
                     self.tip = self.handle_tick(t)?;
                 }
-                _ => break,
+                _ => return Ok(()),
             }
         }
+    }
 
+    #[instrument(skip(self, mc))]
+    fn step(&mut self, mc: &Mutation<'gc>) -> VMResult<()> {
+        self.shuffle(mc)?;
         self.tip = match self.tip.unpack() {
             Value::Ref(_) | Value::App(_) | Value::Tick(_) => {
                 unreachable!("unexpected: {:?}", self.tip)
@@ -1004,14 +1155,7 @@ impl From<crate::file::Program> for VM {
 mod tests {
     use super::*;
     use gc_arena::Arena;
-
-    fn init() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(log::LevelFilter::Trace)
-            .try_init()
-            .unwrap_or_else(|_| log::set_max_level(log::LevelFilter::Trace));
-    }
+    use test_log::test;
 
     macro_rules! comb {
         ($mc:ident, $c:ident) => {
@@ -1055,7 +1199,6 @@ mod tests {
 
     #[test]
     fn arith420() {
-        init();
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let top = app!(mc, :Mul, #42, #10);
@@ -1080,7 +1223,6 @@ mod tests {
 
     #[test]
     fn arith420_nested() {
-        init();
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let top = app!(mc, :Mul, @(:Add, #40, #2), @(:Add, #4, #6));
@@ -1113,7 +1255,6 @@ mod tests {
 
     #[test]
     fn skkr() {
-        init();
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let (s, k, r) = (comb!(mc, S), comb!(mc, K), comb!(mc, R));
@@ -1149,7 +1290,6 @@ mod tests {
 
     #[test]
     fn io_traversal() {
-        init();
         type Root = Rootable![(State<'_>, Pointer<'_>)];
         let mut arena: Arena<Root> = Arena::new(|mc| {
             let bottom = app!(mc, :Neg, :Neg); // Should never be eval'd
@@ -1187,7 +1327,6 @@ mod tests {
 
     #[test]
     fn seq() {
-        init();
         // TODO: use seq to check that strictness is working as expected
     }
 }

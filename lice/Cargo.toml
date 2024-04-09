@@ -18,6 +18,7 @@ cli = [
   "graph",
   "dep:clap",
   "dep:env_logger",
+  "dep:tracing-subscriber",
 ]
 graph = ["file", "dep:petgraph"]
 file = ["std", "dep:nom"]
@@ -38,6 +39,7 @@ rt = [
   "dep:strum",
   "dep:libmath",
   "dep:debug_unwraps",
+  "dep:tracing",
 ]
 
 [dependencies]
@@ -78,6 +80,15 @@ thiserror       = { optional = true, version = "1.0" }
 strum           = { optional = true, version = "0.26", features = ["derive"] }
 libmath         = { optional = true, version = "0.2" }
 debug_unwraps   = { optional = true, version = "0.1" }
+
+tracing = { optional = true, version = "0.1" }
+tracing-subscriber = { optional = true, version = "0.3", features = [
+  "tracing-log",
+  "env-filter",
+] }
+
+[dev-dependencies]
+test-log = { version = "0.2", features = ["trace"] }
 
 [build-dependencies]
 bindgen = { version = "0.69" }
