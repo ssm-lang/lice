@@ -20,7 +20,7 @@ A _121 _122 _123 @ @ :123 @
 A K noDefault fromUTF8 "C.m" @ @ @ :122 @
 A U :121 @
 A U I @ :120 @
-A P noMatch fromUTF8 "tests/Catch.hs" @ @ #6 @ #1 @ @ K2 #99 @ @ :119 @
+A P noMatch fromUTF8 "./Catch.hs" @ @ #6 @ #1 @ @ K2 #99 @ @ :119 @
 A _55 _56 _118 @ @ _113 @ _117 _118 @ @ :118 @
 A B _114 @ _116 @ :117 @
 A C _115 @ #0 @ :116 @
@@ -46,7 +46,7 @@ A B B B B B B B C @ @ @ @ @ @ @ B B B B B B C @ @ @ @ @ @ B B B B B C @ @ @ @ @ 
 A U K Z Z Z Z Z K @ @ @ @ @ @ @ :96 @
 A _74 _75 @ _76 @ _77 @ _78 @ S S C _57 _71 @ @ #0 @ @ I @ @ _73 _95 @ @ @ C C C C _79 _71 @ @ #0 @ @ _73 _95 @ _80 _95 @ _93 #1 @ @ @ @ @ #0 @ @ #1 @ @ _94 @ :95 @
 A U C'B B _77 @ P #1 @ _76 #0 @ #1 @ @ @ @ P #0 @ S P @ S' S' P @ @ C'B _75 @ _77 _90 @ @ @ B B Z @ @ C'B B' _75 @ @ B B _77 _90 @ @ @ C'B _75 @ _77 _90 @ @ @ @ @ @ @ @ @ @ :94 @
-A S C' C @ S S' C' @ B S' @ C _67 @ #0 @ @ @ C' C @ C' S' C' @ @ _60 @ B B _81 noMatch fromUTF8 "./lib/Data/Integer_Type.hs" @ @ #27 @ #1 @ @ @ @ B B _82 _83 @ @ @ U @ @ @ @ _82 _83 @ O #0 @ O #0 @ O #2 @ K @ @ @ @ @ @ @ B B _82 _84 @ @ @ U @ @ @ Y C' C @ B S C _60 @ #0 @ @ @ B S' _27 @ C _85 @ _90 @ @ @ C B @ C _91 @ _90 @ @ @ @ @ _92 @ @ @ @ _76 #0 @ @ :93 @
+A S C' C @ S S' C' @ B S' @ C _67 @ #0 @ @ @ C' C @ C' S' C' @ @ _60 @ B B _81 noMatch fromUTF8 "../lib/Data/Integer_Type.hs" @ @ #27 @ #1 @ @ @ @ B B _82 _83 @ @ @ U @ @ @ @ _82 _83 @ O #0 @ O #0 @ O #2 @ K @ @ @ @ @ @ @ B B _82 _84 @ @ @ U @ @ @ Y C' C @ B S C _60 @ #0 @ @ @ B S' _27 @ C _85 @ _90 @ @ @ C B @ C _91 @ _90 @ @ @ @ @ _92 @ @ @ @ _76 #0 @ @ :93 @
 A K :92 @
 A quot :91 @
 A _60 _89 @ #64 @ _60 _89 @ #32 @ _51 fromUTF8 "Integer: unsupported word size" @ @ @ #32768 @ @ #2147483648 @ :90 @
