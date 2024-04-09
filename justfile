@@ -1,8 +1,10 @@
 set positional-arguments
+just     := "just --justfile " + justfile()
 
 MicroHs  := justfile_directory() / "MicroHs"
 compiler := "gmhs"
 runtime  := "lice"
+scope    := "lice-scope"
 
 profile  := env("PROFILE", "release")
 
@@ -23,8 +25,11 @@ profile_check := if profile =~ "release|debug" {
 log_check := if env("RUST_LOG", "warn")=~ "trace|debug|info|warn|error|all" {
     "OK"
 } else {
-    error("Unknown logging level: " + env_var("RUST_LOG"))
+    error("Unknown logging level: " + env("RUST_LOG"))
 }
+rustc_suppress := env("RUSTFLAGS", "") + \
+    "-A dead_code " + \
+    "-A unused_imports"
 
 # Print this help menu
 @help:
@@ -72,21 +77,22 @@ build-mhs:
 # Quietly ensure lice runtime is built
 [private]
 @ensure-runtime:
-    cargo build --bin {{runtime}} --features=cli --quiet {{ if profile == "release" { "--release" } else { "" } }}
+    RUSTFLAGS="{{rustc_suppress}}" cargo build --bin {{runtime}} --features=cli --quiet {{ if profile == "release" { "--release" } else { "" } }}
 
-
-# Invoke mhs inside the MicroHs directory (watch for relative paths!)
+# Invoke mhs in the given directory
 [private]
-mhs MODULE OUT *FLAGS: ensure-compiler
+mhs INDIR MODULE OUT *FLAGS: ensure-compiler
     #!/usr/bin/env bash
     set -euo pipefail
 
-    cd "{{MicroHs}}"
+    mkdir -p "{{out_dir}}"
+    out="{{out_dir / OUT}}"
+
+    cd {{INDIR}}
 
     echo -ne "Compiling {{MODULE}} to {{OUT}}... "
-    out="{{out_dir / OUT}}"
-    mkdir -p "{{out_dir}}"
-    if {{"./bin" / compiler}} "{{MODULE}}" "-o$out" {{FLAGS}} >"$out.mhserr" 2>&1; then
+
+    if {{MicroHs / "bin" / compiler}} "{{MODULE}}" "-o$out" {{FLAGS}} >"$out.mhserr" 2>&1; then
         echo -e "\033[1;32mOK\033[0m"
         rm "$out.mhserr"
     else
@@ -109,32 +115,32 @@ mhs MODULE OUT *FLAGS: ensure-compiler
         esac
     fi
 
+# Compile a MicroHs test called NAME
+@compile-test NAME:
+    {{just}} mhs "{{MicroHs / "tests"}}" "{{NAME}}" "{{NAME}}.comb" "-i../lib"
+
 # Compile example in the examples/ directory
 @compile-example NAME:
-    just mhs "{{NAME}}" "{{NAME}}.comb" "-i{{eg_dir}}"
-
-# Compile all examples in the examples/ directory
-compile-examples:
-    #!/usr/bin/env bash
-    cd "{{eg_dir}}"
-    for program in *.hs ; do
-        MHSERR=keep just compile-example "${program%.hs}"
-    done
+    {{just}} mhs "{{MicroHs/""}}" "{{NAME}}" "{{NAME}}.comb" "-i{{eg_dir}}"
 
 # Compile MicroHs itself to mhs.comb
 @compile-mhs:
-    just mhs "MicroHs.Main" "mhs.comb" "-isrc"
-
-# Compile a MicroHs test called NAME
-@compile-test NAME:
-    just mhs "{{NAME}}" "{{NAME}}.comb" "-itests"
+    {{just}} mhs "{{MicroHs/""}}" "MicroHs.Main" "mhs.comb" "-isrc"
 
 # Compile all MicroHs tests
 compile-tests:
     #!/usr/bin/env bash
     cd {{MicroHs}}/tests
     for test in *.hs ; do
-        MHSERR=keep just compile-test "${test%.hs}"
+        MHSERR=keep {{just}} compile-test "${test%.hs}"
+    done
+
+# Compile all examples in the examples/ directory
+compile-examples:
+    #!/usr/bin/env bash
+    cd "{{eg_dir}}"
+    for program in *.hs ; do
+        MHSERR=keep {{just}} compile-example "${program%.hs}"
     done
 
 # Compile everything known to man
@@ -181,7 +187,7 @@ test-all:
     cd {{MicroHs}}/tests
     for test in *.hs ; do
         if [ -f "{{out_dir}}/${test%.hs}.comb" ]; then
-            just test "${test%.hs}"
+            {{just}} test "${test%.hs}"
         else
             printf "\033[0;90m%-12s ... [SKIP] (.comb file missing)\033[0m\n" "${test%.hs}"
         fi
@@ -189,12 +195,17 @@ test-all:
     cd {{eg_dir}}
     for example in *.hs ; do
         if [ -f "{{out_dir}}/${example%.hs}.comb" ]; then
-            just test "${example%.hs}"
+            {{just}} test "${example%.hs}"
         fi
     done
 
 # Compile and run an example
-eg NAME: (compile-example NAME) (run ("combs" / NAME + ".comb"))
+@eg NAME: (compile-example NAME)
+    {{just}} run {{"combs" / NAME + ".comb"}}
 
-# Compile and run an example with trace-level logging
-trace NAME: (compile-example NAME) (run-trace ("combs" / NAME + ".comb"))
+# Compile and run an example with trace-level logging and debug profile
+@trace NAME: (compile-example NAME)
+    PROFILE=debug {{just}} run-trace {{"combs" / NAME + ".comb"}}
+
+@scope NAME:
+    cargo run --bin "{{scope}}" --release -- graph {{ "combs" / NAME + ".comb" }}
