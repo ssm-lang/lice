@@ -5,7 +5,7 @@ use lice::{
     file::CombFile,
 };
 use std::{fs::File, io::Read, path::PathBuf, process};
-use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
+use tracing_subscriber::{fmt::format, EnvFilter};
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -13,9 +13,17 @@ struct Cli {
 }
 
 fn main() {
+    let format = format()
+        .with_level(false)
+        .without_time()
+        .with_target(false)
+        .with_ansi(false)
+        .pretty();
+
     tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
         .with_env_filter(EnvFilter::from_default_env())
+        // .with_span_events(format::FmtSpan::NEW | format::FmtSpan::CLOSE)
+        .event_format(format)
         .init();
 
     let args = Cli::parse();

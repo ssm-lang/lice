@@ -198,7 +198,7 @@ impl<'gc> Debug for Pointer<'gc> {
 }
 
 impl<'gc> Pointer<'gc> {
-    #[tracing::instrument(skip(mc, value), fields(T = std::any::type_name::<T>()), ret)]
+    #[tracing::instrument(skip(mc, value), fields(T = std::any::type_name::<T>()), ret, level = "trace")]
     pub fn new<T: IntoValue<'gc>>(mc: &Mutation<'gc>, value: T) -> Self {
         Gc::new(mc, Node::from(value.into_value(mc))).into()
     }
