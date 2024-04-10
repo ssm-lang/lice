@@ -44,11 +44,6 @@ define_language! {
     }
 }
 
-/*
- * Read Zulip about placeholders, cyclic
- * small test case that exhibits same weird behavior (A's) and figure out
- * make sure placeholders are working, get good grasp of cost function
- */
 struct AstSizeHi;
 impl CostFunction<SKI> for AstSizeHi{
     type Cost = usize;
@@ -99,57 +94,6 @@ fn ski_reductions() -> Vec<Rewrite<SKI, ()>> {
 pub fn program_to_egraph(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<SKI, ()>) {
     let mut egraph = EGraph::<SKI, ()>::default();
     let mut idx_eid_map = HashMap::<Index, Id>::new();
-    let mut refs = HashSet::<Id>::new();
-    let root = construct_egraph(program, &mut idx_eid_map, &mut refs, &mut egraph, program.root);
-    // resolve_refs(&idx_eid_map, &refs, &mut egraph);
-    (root, idx_eid_map, egraph)
-}
-
-pub fn program_to_egraph_hi(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<SKI, ()>) {
-    let mut egraph = EGraph::<SKI, ()>::default();
-    let mut idx_eid_map = HashMap::<Index, Id>::new();
-    construct_egraph_hi(program, &mut idx_eid_map, &mut egraph);
-    let root = match idx_eid_map.get(&program.root) {
-        Some(eid) => *eid,
-        None => panic!("missing root"),
-    };
-    
-    println!("root: {:#?} program root: {:#?}\n", root, &program.root);
-
-    egraph.classes().for_each(|ec| {
-        if ec.id == root {
-            println!("{:#?}", ec)
-        }
-    });
-
-    (root, idx_eid_map, egraph)
-}
-
-pub fn program_to_egraph_it(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<SKI, ()>) {
-    let mut egraph = EGraph::<SKI, ()>::default();
-    let mut idx_eid_map = HashMap::<Index, Id>::new();
-    construct_egraph_iter(program, &mut idx_eid_map, &mut egraph);
-
-    let root = match idx_eid_map.get(&program.root) {
-        Some(eid) => *eid,
-        None => panic!("missing root"),
-    };
-    /* 
-    println!("root: {:#?} program root: {:#?}\n", root, &program.root);
-
-    egraph.classes().for_each(|ec| {
-        if ec.id == root {
-            println!("{:#?}", ec)
-        }
-    });
-    */
-
-    (root, idx_eid_map, egraph)
-}
-
-pub fn program_to_egraph_ph(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<SKI, ()>) {
-    let mut egraph = EGraph::<SKI, ()>::default();
-    let mut idx_eid_map = HashMap::<Index, Id>::new();
     add_placeholders(program, &mut idx_eid_map, &mut egraph);
     fill_placeholders(program, &mut idx_eid_map, &mut egraph);
     
@@ -191,19 +135,6 @@ pub fn noop(egraph: EGraph<SKI, ()>, root: Id) -> String {
     println!("best: {:#?}", best);
     
     best.to_string()
-}
-
-fn const_expr_to_enode(expr: &Expr) -> SKI {
-    match expr {
-        Expr::Prim(comb) => SKI::Prim(*comb),
-        Expr::Int(i) => SKI::Int(*i),
-        Expr::Float(flt) => SKI::Float(OrderedFloat(*flt)),
-        // Expr::Ref(lbl) => SKI::Ref(*lbl),
-        Expr::String(s) => SKI::String(s.to_string()),
-        Expr::Tick(s) => SKI::Tick(s.to_string()),
-        Expr::Ffi(s) => SKI::Ffi(s.to_string()),
-        _ => todo!("unreachable, not a const expr {:#?}", expr),
-    }
 }
 
 fn add_placeholders(
@@ -270,213 +201,7 @@ fn fill_placeholders(
         };
 
         egraph.union(placeholder, eid);
-
-        /*
-        if let Expr::Ref(lbl) = expr {
-            let ref_idx = program.defs[*lbl];
-            let ref_eid = match idx_eid_map.get(&ref_idx) {
-                Some(x) => *x,
-                None => panic!("missing ref"),
-            };
-            egraph.union(eid, ref_eid);
-        }
-        */
     })
-}
-
-fn add_const_exprs_to_egraph(
-    program: &Program,
-    idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>,
-) {
-    let const_exprs = program.body.iter().enumerate().filter(|(_, expr)| {
-        matches!(expr, Expr::Prim(_) | Expr::Int(_) | Expr::Float(_) | Expr::Ref(_) | Expr::String(_) | Expr::Tick(_) | Expr::Ffi(_))
-    });
-
-    const_exprs.for_each(|(idx, expr)| {
-        let enode = const_expr_to_enode(expr);
-        let eid = egraph.add(enode);
-        idx_eid_map.insert(idx, eid);
-    });
-}
-
-fn recursively_add_exprs(
-    program: &Program,
-    idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>,
-    idx: Index
-) -> Id {
-    if let Some(eid) = idx_eid_map.get(&idx) {
-        return *eid;
-    }
-
-    match &program.body[idx] {
-        Expr::App(f, a) => {
-            let func_eid = match idx_eid_map.get(f) {
-                Some(eid) => *eid,
-                None => recursively_add_exprs(program, idx_eid_map, egraph, *f),
-            };
-            let arg_eid = match idx_eid_map.get(a) {
-                Some(eid) => *eid,
-                None => recursively_add_exprs(program, idx_eid_map, egraph, *a),
-            };
-            let app_eid = egraph.add(SKI::App([func_eid, arg_eid]));
-            idx_eid_map.insert(idx, app_eid);
-            app_eid
-        },
-        Expr::Array(u, arr) => {
-            let e_arr: Vec<Id> = arr.iter().map(|i| { 
-                let elmt_eid = match idx_eid_map.get(i) {
-                    Some(eid) => *eid,
-                    None => recursively_add_exprs(program, idx_eid_map, egraph, *i),
-                };
-                elmt_eid
-            }).collect();
-            let arr_eid = egraph.add(SKI::Array(*u, e_arr));
-            idx_eid_map.insert(idx, arr_eid);
-            arr_eid
-        },
-        _ => panic!("unreachable"),
-    }
-}
-
-fn add_rec_expr_to_egraph(
-    program: &Program,
-    idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>,
-) {
-    program.body.iter().enumerate().filter(|(_, expr)| {
-        matches!(expr, Expr::App(_, _) | Expr::Array(_, _))
-    }).for_each(|(idx, expr)| { 
-        recursively_add_exprs(program, idx_eid_map, egraph, idx);
-    });
-}
-
-fn construct_egraph_hi(
-    program: &Program,
-    idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>,
-) {
-    add_placeholders(program, idx_eid_map, egraph);
-    fill_placeholders(program, idx_eid_map, egraph);
-}
-
-fn unify_refs(
-    program: &Program,
-    idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>,
-) {
-    program.body.iter().enumerate().filter(|(_, expr)| {
-        matches!(expr, Expr::Ref(_))
-    }).for_each(|(idx, expr)| {
-        match expr {
-            Expr::Ref(lbl) => {
-                let ref_eid = match idx_eid_map.get(&idx) {
-                    Some(x) => *x,
-                    None => panic!("missing ref"),
-                };
-                let lbl_idx = &program.defs[*lbl];
-                let lbl_eid = match idx_eid_map.get(lbl_idx) {
-                    Some(x) => *x,
-                    None => panic!("missing referenced obj"),
-                };
-                egraph.union(ref_eid, lbl_eid);
-            },
-            _ => panic!("unreachable"),
-        }
-    });
-}
-
-fn construct_egraph_iter(
-    program: &Program,
-    idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>,
-) {
-    add_const_exprs_to_egraph(program, idx_eid_map, egraph);
-    add_rec_expr_to_egraph(program, idx_eid_map, egraph);
-    unify_refs(program, idx_eid_map, egraph);
-}
-
-fn construct_egraph(
-    program: &Program,
-    idx_eid_map: &mut HashMap<Index, Id>,
-    refs: &mut HashSet<Id>,
-    egraph: &mut EGraph<SKI, ()>,
-    idx: Index,
-) -> Id {
-    match &program.body[idx] {
-        Expr::App(f, a) => {
-            let func_eid = match idx_eid_map.get(f) {
-                Some(eid) => *eid,
-                None => construct_egraph(program, idx_eid_map, refs, egraph, *f),
-            };
-            let arg_eid = match idx_eid_map.get(a) {
-                Some(eid) => *eid,
-                None => construct_egraph(program, idx_eid_map, refs, egraph, *a),
-            };
-            let app_eid = egraph.add(SKI::App([func_eid, arg_eid]));
-            idx_eid_map.insert(idx, app_eid);
-            app_eid
-        }
-        Expr::Prim(comb) => {
-            let comb_eid = egraph.add(SKI::Prim(*comb));
-            idx_eid_map.insert(idx, comb_eid);
-            comb_eid
-        }
-        Expr::Int(i) => {
-            let int_eid = egraph.add(SKI::Int(*i));
-            idx_eid_map.insert(idx, int_eid);
-            int_eid
-        }
-        Expr::Float(flt) => {
-            let float_eid = egraph.add(SKI::Float(OrderedFloat(*flt)));
-            idx_eid_map.insert(idx, float_eid);
-            float_eid
-        }
-        Expr::Array(u, arr) => {
-            let e_arr: Vec<Id> = arr.iter().map(|idx| { 
-                let elmt_eid = match idx_eid_map.get(idx) {
-                    Some(eid) => *eid,
-                    None => construct_egraph(program, idx_eid_map, refs, egraph, *idx),
-                };
-                elmt_eid
-            }).collect();
-            let arr_eid = egraph.add(SKI::Array(*u, e_arr));
-            idx_eid_map.insert(idx, arr_eid);
-            arr_eid
-        }
-        Expr::Ref(lbl) => {
-            let def_idx = &program.defs[*lbl]; // index of referenced expr in program body
-            println!("sanity {:#?}", def_idx);
-            /*
-            let ref_obj_eid = match idx_eid_map.get(def_idx) {
-                Some(eid) => *eid,
-                None => construct_egraph(program, idx_eid_map, refs, egraph, *def_idx),
-            };
-            let ref_eid = egraph.add(SKI::Ref(usize::from(ref_obj_eid)));
-            */
-            let ref_eid = egraph.add(SKI::RefPlaceholder(*def_idx));
-            refs.insert(ref_eid);
-            idx_eid_map.insert(idx, ref_eid);
-            ref_eid
-        }
-        Expr::String(s) => {
-            let str_eid = egraph.add(SKI::String(s.to_string()));
-            idx_eid_map.insert(idx, str_eid);
-            str_eid
-        }
-        Expr::Tick(s) => {
-            let tick_eid = egraph.add(SKI::Tick(s.to_string()));
-            idx_eid_map.insert(idx, tick_eid);
-            tick_eid
-        }
-        Expr::Ffi(s) => {
-            let ffi_eid = egraph.add(SKI::Ffi(s.to_string()));
-            idx_eid_map.insert(idx, ffi_eid);
-            ffi_eid
-        }
-        _ => todo!("Unknown lice Expr"),
-    }
 }
 
 fn eclasses_check(egraph: &EGraph<SKI, ()>) {
@@ -486,70 +211,6 @@ fn eclasses_check(egraph: &EGraph<SKI, ()>) {
         ).collect();
         assert!(!not_ref_or_placeholder.is_empty())
     })
-}
-
-/*
-fn resolve_refs(
-    idx_eid_map: &HashMap<Index, Id>,
-    refs: &HashSet<Id>,
-    egraph: &mut EGraph<SKI, ()>
-) {
-    let refs_to_create = egraph.classes_mut().filter(|ec| refs.contains(&ec.id));
-    let mut refs_to_unify = HashSet::<(Id, Id)>::new();
-    let mut hmm = Vec::<Id>::new();
-
-    println!("{:#?}", idx_eid_map);
-
-    // create the refs
-    refs_to_create.for_each(|ec| {
-        let placeholder = &ec.nodes[0];
-        println!("{:#?}", ec);
-        let ref_node = match placeholder {
-            SKI::RefPlaceholder(lbl_idx) => {
-                let lbl_eid = match idx_eid_map.get(lbl_idx) {
-                    Some(eid) => *eid,
-                    None => panic!("missing ref"),
-                };
-                refs_to_unify.insert((ec.id, lbl_eid));
-                hmm.push(lbl_eid);
-                SKI::Ref(usize::from(lbl_eid))
-                // SKI::RefPlaceholder(usize::from(lbl_eid))
-                // SKI::RefPlaceholder(lbl_idx)
-            }
-            _ => panic!("unreachable"),
-        };
-        ec.nodes[0] = ref_node;
-        println!("{:#?}\n", ec);
-    });
-    
-    hmm.sort();
-    println!("{:#?}", hmm);
-
-    // unify refs
-    refs_to_unify.iter().for_each(|(ref_eid, lbl_eid)| {
-        egraph.union(*ref_eid, *lbl_eid);
-    });
-
-    println!("hi");
-}
-*/
-
-fn construct_program(
-    expr: &RecExpr<SKI>,
-    root: Id
-) -> Program {
-    let expr_vec = expr.as_ref();
-    let body = expr_vec.iter().map(|e| match e {
-        SKI::App([f, a]) => Expr::App(usize::from(*f), usize::from(*a)),
-        SKI::Prim(comb) => Expr::Prim(*comb),
-        SKI::Int(i) => Expr:: Int(*i),
-        _ => todo!("add more exprs")
-    }).collect();
-    Program {
-        root: usize::from(root),
-        body,
-        defs: vec![0],
-    }
 }
 
 #[cfg(test)]
@@ -632,14 +293,12 @@ mod tests {
             ],
             defs: vec![1],
         };
-        println!("SMALL");
         println!("expr: {:#?}", p.to_string());
-        let (root, _m, egraph) = program_to_egraph_ph(&p);
+        let (root, _m, egraph) = program_to_egraph(&p);
         println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
         let optimized = optimize(egraph, root, "dots/test3.svg"); 
         println!("optimized: {:#?}\n", optimized);
-        println!("SMALL END");
     }
 
     #[test]
@@ -657,14 +316,12 @@ mod tests {
             ],
             defs: vec![1],
         };
-        println!("SMALL");
         println!("expr: {:#?}", p.to_string());
-        let (root, _m, egraph) = program_to_egraph_ph(&p);
+        let (root, _m, egraph) = program_to_egraph(&p);
         println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
         let optimized = optimize(egraph, root, "dots/test4.svg"); 
         println!("optimized: {:#?}\n", optimized);
-        println!("SMALL END");
     }
 
     #[test]
@@ -691,13 +348,11 @@ mod tests {
             ],
             defs: vec![1, 7],
         };
-        println!("SMALL");
         println!("expr: {:#?}", p.to_string());
-        let (root, _m, egraph) = program_to_egraph_ph(&p);
+        let (root, _m, egraph) = program_to_egraph(&p);
         println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
         let optimized = optimize(egraph, root, "dots/test5.svg"); 
         println!("optimized: {:#?}\n", optimized);
-        println!("SMALL END");
     }
 }
