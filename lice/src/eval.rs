@@ -922,6 +922,7 @@ impl<'gc> State<'gc> {
 
         self.resume_io(mc, Pointer::new(mc, arr.write(mc, idx, elem)))
     }
+
     /// `next` has been reduced to the given combinator, with all strict arguments evaluated.
     #[instrument(skip(self, mc), level = "trace")]
     fn eval_comb(&mut self, comb: Combinator, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
@@ -1098,6 +1099,7 @@ impl<'gc> State<'gc> {
             FfiSymbol::unlink => self.handle_unop(mc, ffi, ffi!(libc::unlink:(_))),
             FfiSymbol::malloc => self.handle_unop(mc, ffi, ffi!(libc::malloc:(_))),
             FfiSymbol::free => self.handle_unop(mc, ffi, ffi!(libc::free:(_))),
+            FfiSymbol::GETTIMEMILLI => self.resume_io(mc, Pointer::new(mc, ffi::gettimemilli())),
         }
     }
 

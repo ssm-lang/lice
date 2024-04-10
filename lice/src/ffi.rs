@@ -158,12 +158,21 @@ pub enum FfiSymbol {
     malloc,
     #[reduce(from = "!ptr", to_io = "unit")]
     free,
+
+    #[reduce(constant, to_io = "int")]
+    GETTIMEMILLI,
 }
 
 impl FfiSymbol {
     pub fn lookup(name: &str) -> Option<Self> {
         Self::from_str(name).ok()
     }
+}
+
+pub fn gettimemilli() -> usize {
+    use std::time::*;
+    let now = SystemTime::now();
+    now.duration_since(UNIX_EPOCH).unwrap().as_millis() as usize
 }
 
 #[allow(non_upper_case_globals)]
