@@ -38,3 +38,24 @@ Compiling Arith to Arith.comb... OK
 $ just test Arith         # Run MicroHs regression test
 Arith        ... [PASS]
 ```
+
+## TODOs
+
+What is left to achieve language feature-parity with MHS's `eval.c`:
+
+- Garbage collection (we never run `gc_arena`'s `collect()` function lol)
+- Arrays
+- `StrEqual` and `Compare`
+- Node casting
+- RNF
+- Most FFI stubs (famous last words: _this should be straightforward_)
+- Dynamic FFI symbol resolution
+- Serialization/deserialization
+
+And optimizations to address some known deficiencies (though it would be
+interesting to benchmark without these optimizations):
+
+- Packed memory layout
+- String memory layout
+- Array memory layout
+- Be less safe about error-handling (many are unnecessary)

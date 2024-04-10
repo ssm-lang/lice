@@ -1,3 +1,11 @@
+-- | A simple example that uses IO Arrays.
+--
+-- It should print:
+--
+--  10
+--  [0,1,4,9,16,25,36,49,64,81]
+--  "foo"
+--  "bar"
 module Array(main) where
 import Prelude
 import Data.IOArray
