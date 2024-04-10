@@ -245,7 +245,7 @@ mod tests {
             defs: vec![0],
         };
         assert_eq!(p.to_string(), "S K :0 @ _0 @ #1 @ }");
-        let (root, _, egraph) = program_to_egraph_it(&p);
+        let (root, _, egraph) = program_to_egraph(&p);
         let optimized = optimize(egraph, root, "dots/test1.svg"); 
         // println!("{:#?}\n", optimized);
         assert!(optimized == "1");
@@ -267,7 +267,7 @@ mod tests {
             defs: vec![1],
         };
         // println!("------- refs\n {:#?}", p.to_string());
-        let (root, _m, egraph) = program_to_egraph_it(&p);
+        let (root, _m, egraph) = program_to_egraph(&p);
         // println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
         let optimized = optimize(egraph, root, "dots/test2.svg"); 
