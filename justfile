@@ -159,6 +159,8 @@ test NAME: # (compile-test NAME)
         echo -ne "\033[1;31m[ERR]\033[0;31m\t"
         if grep -q "not yet implemented: " <"$result" ; then
             grep "not yet implemented: " <"$result" | head -n 1
+        elif grep -q "not implemented: " <"$result" ; then
+            grep "not implemented: " <"$result" | head -n 1
         elif grep -q "missing FFI symbol: " <"$result" ; then
             grep "missing FFI symbol: " <"$result" | head -n 1
         elif grep -q "crash: " <"$result" ; then
