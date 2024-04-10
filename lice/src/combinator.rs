@@ -16,6 +16,8 @@ pub trait Reduce {
 
     fn redux(&self) -> Option<&'static [ReduxCode]>;
 
+    fn io_action(&self) -> bool;
+
     /// How many arguments are needed for reduction.
     #[inline]
     fn arity(&self) -> usize {
@@ -103,14 +105,21 @@ pub enum Combinator {
     Rnf,
     /// Bottom value, throws an exception with the Haskell string as the error message.
     #[display("error")]
-    #[reduce(from = "!msg")]
+    #[reduce(from = "msg")]
     ErrorMsg,
-    /// Bottom value, throws an exception with the Haskell string as the error message.
+    /// Throws an exception when there is no default instance for some class.
+    ///
+    /// The `msg` argument is supposed to be a Haskell `String`, but is typically `fromUTF8`
+    /// applied to a string literal.
     #[display("noDefault")]
-    #[reduce(from = "!msg")]
+    #[reduce(from = "msg")]
     NoDefault,
+    /// Throws an exception when there is an incomplete pattern-match.
+    ///
+    /// The `msg` argument is supposed to be a Haskell `String`, but is typically `fromUTF8`
+    /// applied to a string literal.
     #[display("noMatch")]
-    #[reduce(from = "!msg !line_nr !col_nr")]
+    #[reduce(from = "msg !line_nr !col_nr")]
     NoMatch,
 
     /** Comparisons **/
@@ -341,13 +350,13 @@ pub enum Combinator {
     ///
     /// Has type `Monad m => a -> m a`
     #[display("IO.return")]
-    #[reduce(from = "a")]
+    #[reduce(from = "a", to_io = "ma")]
     Return,
     /// Monadic bind in the IO monad.
     ///
     /// Has type `Monad m => m a -> (a -> m b) -> m b`.
     #[display("IO.>>=")]
-    #[reduce(from = "ma a_mb")]
+    #[reduce(from = "ma a_mb", to_io = "mb")]
     Bind,
     /// Kleisli-composition (?) in the IO monad.
     ///
@@ -364,31 +373,31 @@ pub enum Combinator {
     ///                     ===     r >>= (s >=> q)
     /// ```
     #[display("IO.C'BIND")]
-    #[reduce(from = "a_mb b_mc a")]
+    #[reduce(from = "a_mb b_mc a", to_io = "mc")]
     CCBind,
     /// Sequencing in the IO monad.
     ///
     /// Has type `Monad m => m a -> m b -> m b`.
     #[display("IO.>>")]
-    #[reduce(from = "ma mb")]
+    #[reduce(from = "ma mb", to_io = "mb")]
     Then,
     #[display("IO.performIO")]
-    #[reduce(from = "io_term")]
+    #[reduce(from = "ma", to_io = "a")]
     PerformIO,
     /// Execute a term, and catch any thrown exception.
     #[display("IO.catch")]
-    #[reduce(from = "!term handler")]
+    #[reduce(from = "term handler", to_io = "term")]
     Catch,
     /// A dynamic FFI lookup from a Haskell string.
     #[display("dynsym")]
-    #[reduce(from = "!name")]
+    #[reduce(from = "!hstring", to_io = "TODO")]
     DynSym,
 
     #[display("IO.serialize")]
-    #[reduce(from = "!file_ptr term")]
+    #[reduce(from = "!BFILE* term", to_io = "TODO")]
     Serialize,
     #[display("IO.deserialize")]
-    #[reduce(from = "!file_ptr")]
+    #[reduce(from = "!BFILE*", to_io = "TODO")]
     Deserialize,
     /// A handle to standard input.
     #[display("IO.stdin")]
@@ -406,31 +415,31 @@ pub enum Combinator {
     ///
     /// FIXME: Apparently, the semantics are like `IO.serialize`, except without a header??
     #[display("IO.print")]
-    #[reduce(from = "!file_ptr !term")]
+    #[reduce(from = "!BFILE* !term", to_io = "unit")]
     Print,
-    #[display("IO.getArgs")]
-    #[reduce(constant)]
-    GetArgs,
+    #[display("IO.getArgRef")]
+    #[reduce(constant, to_io = "args")]
+    GetArgRef,
     #[display("IO.getTimeMilli")]
-    #[reduce(from = "FIXME")] // TODO: how is this evaluated?
+    #[reduce(from = "FIXME", to_io = "TODO")]
     GetTimeMilli,
 
     /*** Arrays ***/
     /// Allocate an array of the specified size, all initialized to the given element.
     #[display("A.alloc")]
-    #[reduce(from = "!size elem")]
+    #[reduce(from = "!size elem", to_io = "array")]
     ArrAlloc,
     /// Get the size of an array.
     #[display("A.size")]
-    #[reduce(from = "!arr")]
+    #[reduce(from = "!arr", to_io = "size")]
     ArrSize,
     /// Read an element from an array.
     #[display("A.read")]
-    #[reduce(from = "!arr !idx")]
+    #[reduce(from = "!arr !idx", to_io = "T")]
     ArrRead,
     /// Write an element to an array.
     #[display("A.write")]
-    #[reduce(from = "!arr !idx elem")]
+    #[reduce(from = "!arr !idx elem", to_io = "unit")]
     ArrWrite,
     /// Array equality.
     ///
@@ -442,38 +451,39 @@ pub enum Combinator {
     /** C strings **/
 
     /// Read a Haskell string from a UTF-8-encoded C string.
-    ///
-    /// TODO: Really ??? This doesn't seem right. How is this non-IO? Figure out what is going on.
     #[display("fromUTF8")]
     #[reduce(from = "!cstr")]
     FromUtf8,
 
-    /// Construct a C string from a Haskell string, returning its length.
+    /// Construct a C ASCII string from a Haskell string.
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("newCAStringLen")]
-    #[reduce(from = "!hstr")]
-    CStringNew,
-    /// Read a Haskell string from a C string.
+    #[reduce(from = "hstr", to_io = "pair_cstr_len")]
+    CAStringLenNew,
+    /// Read a Haskell string from a C ASCII string.
     ///
     /// The encoding of the string depends on the encoding of the Haskell implementation.
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAString")]
-    #[reduce(from = "!cstr")]
-    CStringPeek,
-    /// Read a Haskell string from a C string, up to the given length.
+    #[reduce(from = "!cstr", to_io = "hstring")]
+    CAStringPeek,
+    /// Read a Haskell string from a C ASCII string, up to the given length.
     ///
     /// The encoding of the string depends on the encoding of the Haskell implementation.
     ///
     /// Related: <https://downloads.haskell.org/~ghc/5.02.3/docs/set/sec-cstring.html>
     #[display("peekCAStringLen")]
-    #[reduce(from = "!cstr !max_len")]
-    CStringPeekLen,
+    #[reduce(from = "!cstr !max_len", to_io = "hstring")]
+    CAStringPeekLen,
 }
 
 /// The runtime needs to know how core data structures are encoded: booleans, pairs, and lists.
 impl Combinator {
+    /// Scott-encoded unit `()`.
+    pub const UNIT: Self = Self::I;
+
     /// Scott-encoded `True`.
     pub const TRUE: Self = Self::A;
     /// Scott-encoded `False`.
@@ -485,7 +495,37 @@ impl Combinator {
     /// Scott-encoded list cons `(:)`.
     pub const CONS: Self = Self::O;
     /// Scott-encoded list nil `[]`.
-    pub const NIL: Self = Self::FALSE;
+    pub const NIL: Self = Self::K;
+}
+
+/// Scott-encoded `Ordering` constants, returned by `compare`.
+#[cfg(feature = "rt")]
+impl<'gc> crate::memory::IntoValue<'gc> for core::cmp::Ordering {
+    fn into_value(self, mc: &gc_arena::Mutation<'gc>) -> crate::memory::Value<'gc> {
+        /// TODO: this should not allocate new combinators each time.
+        use crate::memory::App;
+        use crate::memory::Pointer;
+        use core::cmp::Ordering;
+        match self {
+            Ordering::Less => {
+                let z = Pointer::new(mc, Combinator::Z);
+                let b = Pointer::new(mc, Combinator::B);
+                App { fun: z, arg: b }
+            }
+            Ordering::Equal => {
+                // Encoded as K K
+                let k = Pointer::new(mc, Combinator::K);
+                App { fun: k, arg: k }
+            }
+            Ordering::Greater => {
+                // Encoded as K A
+                let k = Pointer::new(mc, Combinator::K);
+                let a = Pointer::new(mc, Combinator::A);
+                App { fun: k, arg: a }
+            }
+        }
+        .into()
+    }
 }
 
 #[cfg(test)]
@@ -506,7 +546,7 @@ mod tests {
         (Combinator::Return, "IO.return"),
         (Combinator::StdOut, "IO.stdout"),
         (Combinator::PerformIO, "IO.performIO"),
-        (Combinator::CStringNew, "newCAStringLen"),
+        (Combinator::CAStringLenNew, "newCAStringLen"),
     ];
 
     #[test]

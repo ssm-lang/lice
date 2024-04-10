@@ -1,13 +1,12 @@
 //! Runtime memory layout for combinator graph reducer.
 
-use crate::ffi::Ffi;
+use crate::ffi::{self, BadDyn, FfiSymbol, ForeignPtr};
 use crate::float::Float;
 use crate::string::VString;
 use crate::tick::{Tick, TickTable};
 use crate::{combinator::Combinator, integer::Integer};
 use core::fmt::Debug;
 use core::{cell::Cell, ops};
-use derive_more::{From, TryInto, Unwrap};
 use gc_arena::{barrier::Unlock, lock::Lock, static_collect, Collect, Gc, Mutation};
 
 /// A node in the combinator graph.
@@ -31,24 +30,19 @@ impl<'gc> Unlock for Node<'gc> {
     }
 }
 
-#[derive(Clone, Copy, Collect, PartialEq)]
-#[collect(no_drop)]
-pub struct App<'gc> {
-    pub fun: Pointer<'gc>,
-    pub arg: Pointer<'gc>,
-}
-
-impl<'gc> Debug for App<'gc> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("App")
-            .field("fun", &Gc::as_ptr(self.fun.ptr))
-            .field("arg", &Gc::as_ptr(self.fun.ptr))
-            .finish()
-    }
-}
-
 /// Inner contents of a node.
-#[derive(Debug, Clone, Copy, Collect, PartialEq, From, TryInto, Unwrap)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Collect,
+    PartialEq,
+    derive_more::From,
+    derive_more::Unwrap,
+    derive_more::TryUnwrap,
+    derive_more::IsVariant,
+    strum::IntoStaticStr,
+)]
 #[collect(no_drop)]
 pub enum Value<'gc> {
     App(App<'gc>),
@@ -57,12 +51,39 @@ pub enum Value<'gc> {
     String(VString<'gc>),
     Integer(Integer),
     Float(Float),
-    Ffi(Ffi<'gc>),
+    BadDyn(BadDyn<'gc>),
+    Ffi(FfiSymbol),
     Tick(Tick),
+    ForeignPtr(ForeignPtr),
 }
 
 // Combinators are just constant values.
 static_collect!(Combinator);
+macro_rules! from_gc_value {
+    ($variant:ident) => {
+        fn from_value(
+            _mc: &gc_arena::Mutation<'gc>,
+            value: crate::memory::Value<'gc>,
+        ) -> Result<Self, crate::memory::ConversionError> {
+            if let crate::memory::Value::$variant(v) = value {
+                Ok(v.into())
+            } else {
+                Err(crate::memory::ConversionError {
+                    expected: core::any::type_name::<Self>(),
+                    got: value.into(),
+                })
+            }
+        }
+    };
+}
+
+macro_rules! into_gc_value {
+    ($variant:ident) => {
+        fn into_value(self, _mc: &gc_arena::Mutation<'gc>) -> crate::memory::Value<'gc> {
+            crate::memory::Value::$variant(self.into())
+        }
+    };
+}
 
 impl<'gc> Value<'gc> {
     pub fn whnf(&self) -> bool {
@@ -81,7 +102,11 @@ impl<'gc> Node<'gc> {
     }
 
     pub fn unpack_arg(&self) -> Pointer<'gc> {
-        self.unpack().unwrap_app().arg
+        if let Value::App(_) = self.unpack() {
+            self.unpack().unwrap_app().arg
+        } else {
+            panic!("Tried to unwrap non-app node: {self:?}")
+        }
     }
 }
 
@@ -109,6 +134,40 @@ impl<'gc> From<()> for Value<'gc> {
     }
 }
 
+#[derive(Clone, Copy, Collect, PartialEq)]
+#[collect(no_drop)]
+pub struct App<'gc> {
+    pub fun: Pointer<'gc>,
+    pub arg: Pointer<'gc>,
+}
+
+impl<'gc> Debug for App<'gc> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("App")
+            .field("fun", &Gc::as_ptr(self.fun.ptr))
+            .field("arg", &Gc::as_ptr(self.arg.ptr))
+            .finish()
+    }
+}
+
+impl<'gc> FromValue<'gc> for App<'gc> {
+    from_gc_value!(App);
+}
+
+pub(crate) fn make_pair<'gc>(
+    mc: &Mutation<'gc>,
+    (x, y): (Pointer<'gc>, Pointer<'gc>),
+) -> Pointer<'gc> {
+    let pair = Pointer::new(mc, Value::Combinator(Combinator::PAIR));
+    Pointer::new(
+        mc,
+        Value::App(App {
+            fun: Pointer::new(mc, Value::App(App { fun: pair, arg: x })),
+            arg: y,
+        }),
+    )
+}
+
 /// A reference to a [`Node`].
 ///
 /// Because `Pointer`s need to be packed into the [`Node`] union, their size must be the same size
@@ -133,18 +192,24 @@ impl<'gc> Debug for Pointer<'gc> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("Pointer")
             .field(&Gc::as_ptr(self.ptr))
-            .field(self.ptr.as_ref())
+            .field(&self.ptr.as_ref().unpack())
             .finish()
     }
 }
 
 impl<'gc> Pointer<'gc> {
-    pub fn new(mc: &Mutation<'gc>, value: Value<'gc>) -> Self {
-        Gc::new(mc, Node::from(value)).into()
+    #[tracing::instrument(skip(mc, value), fields(T = std::any::type_name::<T>()), ret, level = "trace")]
+    pub fn new<T: IntoValue<'gc>>(mc: &Mutation<'gc>, value: T) -> Self {
+        Gc::new(mc, Node::from(value.into_value(mc))).into()
     }
 
-    pub fn set(&self, mc: &Mutation<'gc>, value: Value<'gc>) {
-        self.ptr.unlock(mc).set(value)
+    pub fn set<T: IntoValue<'gc>>(&self, mc: &Mutation<'gc>, value: T) {
+        self.ptr.unlock(mc).set(value.into_value(mc))
+    }
+
+    pub fn set_ref(&self, mc: &Mutation<'gc>, ptr: Pointer<'gc>) -> Pointer<'gc> {
+        self.ptr.unlock(mc).set(Value::Ref(ptr));
+        ptr
     }
 
     pub fn follow(&self) -> Self {
@@ -155,11 +220,12 @@ impl<'gc> Pointer<'gc> {
         ptr
     }
 
-    pub fn forward(&mut self, _mc: &Mutation<'gc>) {
-        // TODO: forward all pointers to final destination
+    pub fn forward(&mut self, _mc: &Mutation<'gc>) -> Self {
+        // TODO: forward all pointers to final destination?
         while let Value::Ref(p) = self.unpack() {
             *self = p;
         }
+        *self
     }
 }
 
@@ -181,6 +247,36 @@ impl<'gc> ops::Deref for Pointer<'gc> {
 impl<'gc> From<Gc<'gc, Node<'gc>>> for Pointer<'gc> {
     fn from(value: Gc<'gc, Node<'gc>>) -> Self {
         Self { ptr: value }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("could not perform conversion, expected {expected}, got {got}")]
+pub struct ConversionError {
+    pub expected: &'static str,
+    pub got: &'static str,
+}
+
+pub trait FromValue<'gc>: Sized {
+    fn from_value(mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Self, ConversionError>;
+}
+
+impl<'gc, T: From<Value<'gc>>> FromValue<'gc> for T {
+    fn from_value(_mc: &Mutation<'gc>, value: Value<'gc>) -> Result<Self, ConversionError> {
+        Ok(value.into())
+    }
+}
+
+pub trait IntoValue<'gc> {
+    fn into_value(self, mc: &Mutation<'gc>) -> Value<'gc>;
+}
+
+impl<'gc, T> IntoValue<'gc> for T
+where
+    Value<'gc>: From<T>,
+{
+    fn into_value(self, _mc: &Mutation<'gc>) -> Value<'gc> {
+        self.into()
     }
 }
 
@@ -207,16 +303,30 @@ impl crate::file::Program {
                         arg: heap[*a],
                     }),
                     Expr::Ref(r) => Value::Ref(heap[self.defs[*r]]),
-                    Expr::Prim(c) => Value::Combinator(*c),
+                    Expr::Prim(c) => match *c {
+                        Combinator::PNull => ForeignPtr::null().into(),
+                        Combinator::StdIn => unsafe { ffi::bfile::mystdin() }.into_value(mc),
+                        Combinator::StdOut => unsafe { ffi::bfile::mystdout() }.into_value(mc),
+                        Combinator::StdErr => unsafe { ffi::bfile::mystderr() }.into_value(mc),
+                        c => Value::Combinator(c),
+                    },
                     Expr::Float(f) => Value::Float(Float::from(*f)),
                     Expr::Int(i) => Value::Integer(Integer::from(*i)),
                     Expr::String(s) => Value::String(VString::new(mc, s)),
                     Expr::Tick(name) => Value::Tick(tick_table.add_entry(name)),
-                    Expr::Ffi(name) => Value::Ffi(Ffi::new(mc, name)),
+                    Expr::Ffi(name) => FfiSymbol::lookup(name).map_or_else(
+                        || {
+                            log::warn!("Could not find {name}");
+                            BadDyn::new(mc, name).into()
+                        },
+                        Value::Ffi,
+                    ),
                     Expr::Array(_, _) => todo!("arrays"),
                     Expr::Unknown(s) => panic!("unable to deserialize {s}"),
                 },
-            )
+            );
+            log::trace!("*** Initialized from expr #{i}: {expr}");
+            log::trace!("    {:?}", heap[i]);
         }
 
         heap[self.root]

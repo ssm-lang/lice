@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "lice",
-    "lice-scope",
-    "lice-macros",
-    "lice-egraph",
+  "lice",
+  "lice-scope",
+  "lice-macros",
+  "lice-egraph",
 ]
 
 [workspace.package]

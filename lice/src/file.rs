@@ -11,7 +11,7 @@ use nom::{
     combinator::{map_res, opt, recognize, verify},
     multi::fold_many0,
     number::complete::double,
-    sequence::{delimited, preceded, separated_pair},
+    sequence::{delimited, preceded, separated_pair, terminated},
     IResult, Parser,
 };
 use parse_display::Display;
@@ -22,12 +22,6 @@ pub type Index = usize;
 
 /// Vector indices in the [`Program`] `defs` list.
 pub type Label = usize;
-
-/// Representation of integer literals that appear in the program code.
-pub type Int = i64;
-
-/// Representation of float literals that appear in the program code.
-pub type Float = f64;
 
 pub(crate) const NIL_INDEX: Index = Index::MAX;
 pub(crate) const NIL_LABEL: Label = Label::MAX;
@@ -77,10 +71,10 @@ pub enum Expr {
     App(Index, Index),
     /// Floating point literal, i.e., `&float`.
     #[display("&{0}")]
-    Float(Float),
+    Float(f64),
     /// Integer literal, possibly negative, i.e., `#[-]int`.
     #[display("#{0}")]
-    Int(Int),
+    Int(i64),
     /// Fixed size array of expressions, i.e., `[size arr]`.
     #[display("[{0}]")]
     Array(usize, Vec<Index>),
@@ -246,7 +240,10 @@ fn string_literal(input: &str) -> Parse<String> {
     let literal = verify(is_not("\"\\"), |s: &str| !s.is_empty());
     let escaped_char = preceded(
         char('\\'),
-        map_res(digit1, |s: &str| s.parse::<u8>()).map(|n| n as char),
+        terminated(
+            map_res(digit1, |s: &str| s.parse::<u8>()).map(|n| n as char),
+            char('&'),
+        ),
     );
 
     let build_string = fold_many0(
