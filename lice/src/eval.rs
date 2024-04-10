@@ -1,4 +1,5 @@
 use crate::{
+    array::Array,
     combinator::{Combinator, Reduce, ReduxCode},
     ffi::{self, FfiSymbol, ForeignPtr},
     float::{FShow, Float},
@@ -868,6 +869,59 @@ impl<'gc> State<'gc> {
         }
     }
 
+    #[instrument(skip(self, mc), level = "trace")]
+    fn handle_array_alloc(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::ArrAlloc;
+        let app = expect!(self.spine.pop()).forward(mc);
+        let len = unpack_arg(app, 0, comb)?.forward(mc);
+        let len = usize::from_value(mc, len.unpack()).expect("FIXME");
+
+        let app = expect!(self.spine.pop()).forward(mc);
+        let init = unpack_arg(app, 0, comb)?.forward(mc);
+
+        let arr = Array::new(mc, len, init);
+        self.resume_io(mc, Pointer::new(mc, arr))
+    }
+
+    #[instrument(skip(self, mc), level = "trace")]
+    fn handle_array_size(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::ArrAlloc;
+        let app = expect!(self.spine.pop()).forward(mc);
+        let arr = unpack_arg(app, 0, comb)?.forward(mc);
+        let arr = Array::from_value(mc, arr.unpack()).expect("FIXME");
+        self.resume_io(mc, Pointer::new(mc, arr.len()))
+    }
+
+    #[instrument(skip(self, mc), level = "trace")]
+    fn handle_array_read(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::ArrAlloc;
+        let app = expect!(self.spine.pop()).forward(mc);
+        let arr = unpack_arg(app, 0, comb)?.forward(mc);
+        let arr = Array::from_value(mc, arr.unpack()).expect("FIXME");
+
+        let app = expect!(self.spine.pop()).forward(mc);
+        let idx = unpack_arg(app, 0, comb)?.forward(mc);
+        let idx = usize::from_value(mc, idx.unpack()).expect("FIXME");
+
+        self.resume_io(mc, Pointer::new(mc, arr.read(idx)))
+    }
+
+    #[instrument(skip(self, mc), level = "trace")]
+    fn handle_array_write(&mut self, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
+        let comb = Combinator::ArrAlloc;
+        let app = expect!(self.spine.pop()).forward(mc);
+        let arr = unpack_arg(app, 0, comb)?.forward(mc);
+        let arr = Array::from_value(mc, arr.unpack()).expect("FIXME");
+
+        let app = expect!(self.spine.pop()).forward(mc);
+        let idx = unpack_arg(app, 0, comb)?.forward(mc);
+        let idx = usize::from_value(mc, idx.unpack()).expect("FIXME");
+
+        let app = expect!(self.spine.pop()).forward(mc);
+        let elem = unpack_arg(app, 0, comb)?.forward(mc);
+
+        self.resume_io(mc, Pointer::new(mc, arr.write(mc, idx, elem)))
+    }
     /// `next` has been reduced to the given combinator, with all strict arguments evaluated.
     #[instrument(skip(self, mc), level = "trace")]
     fn eval_comb(&mut self, comb: Combinator, mc: &Mutation<'gc>) -> VMResult<Pointer<'gc>> {
@@ -989,10 +1043,10 @@ impl<'gc> State<'gc> {
             Combinator::GetArgRef => todo!("{comb:?}"),
             Combinator::GetTimeMilli => todo!("{comb:?}"),
 
-            Combinator::ArrAlloc => todo!("{comb:?}"),
-            Combinator::ArrSize => todo!("{comb:?}"),
-            Combinator::ArrRead => todo!("{comb:?}"),
-            Combinator::ArrWrite => todo!("{comb:?}"),
+            Combinator::ArrAlloc => self.handle_array_alloc(mc),
+            Combinator::ArrSize => self.handle_array_size(mc),
+            Combinator::ArrRead => self.handle_array_read(mc),
+            Combinator::ArrWrite => self.handle_array_write(mc),
             Combinator::ArrEq => todo!("{comb:?}"),
 
             Combinator::FromUtf8 => self.handle_from_utf8(mc),
@@ -1146,9 +1200,11 @@ impl<'gc> State<'gc> {
                 unreachable!("unexpected: {:?}", self.tip)
             }
             Value::Combinator(comb) => self.start_strict(comb.into(), mc),
-            Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::ForeignPtr(_) => {
-                self.resume_strict(mc)
-            }
+            Value::String(_)
+            | Value::Integer(_)
+            | Value::Float(_)
+            | Value::ForeignPtr(_)
+            | Value::Array(_) => self.resume_strict(mc),
             Value::Ffi(ffi) => self.start_strict(ffi.into(), mc),
             Value::BadDyn(sym) => Err(VMError::BadDyn(sym.name().to_string())),
         }?;

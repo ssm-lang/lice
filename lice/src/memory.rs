@@ -1,5 +1,6 @@
 //! Runtime memory layout for combinator graph reducer.
 
+use crate::array::Array;
 use crate::ffi::{self, BadDyn, FfiSymbol, ForeignPtr};
 use crate::float::Float;
 use crate::string::VString;
@@ -55,6 +56,7 @@ pub enum Value<'gc> {
     Ffi(FfiSymbol),
     Tick(Tick),
     ForeignPtr(ForeignPtr),
+    Array(Array<'gc>),
 }
 
 // Combinators are just constant values.

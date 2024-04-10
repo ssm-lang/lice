@@ -15,6 +15,9 @@ pub mod eval;
 pub mod string;
 
 #[cfg(feature = "rt")]
+pub mod array;
+
+#[cfg(feature = "rt")]
 pub mod integer;
 
 #[cfg(feature = "rt")]
