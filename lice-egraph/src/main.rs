@@ -33,12 +33,12 @@ fn main() {
     let optimized = optimize(egraph, root, "dots/main.svg"); 
     println!("{:#?}\n len: {:#?}", optimized, optimized.len());
     
-    /*
-    let (root2, _, egraph2) = program_to_egraph_hi(&c.program);
+    let (root2, _, egraph2) = program_to_egraph_ph(&c.program);
     let noop = noop(egraph2, root2); 
     println!("{:#?}\n len: {:#?}", noop, noop.len());
 
-    println!("{:#?}", mp[&c.program.defs[42]]);
-    */
+    // println!("{:#?}", mp[&c.program.defs[42]]);
 }
+
+
 

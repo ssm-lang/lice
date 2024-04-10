@@ -4,154 +4,28 @@ use ordered_float::OrderedFloat;
 use lice::combinator::Combinator;
 use lice::file::{Expr, Index, Program};
 
-/*
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone)]
-pub enum SKI {
-    Prim(Combinator),
-    App([Id; 2]),
-    Int(i64),
-    Float(OrderedFloat<f64>),
-    Array(usize, Vec<Id>),
-    Ref(usize),
-    String(String),
-    Tick(String),
-    Ffi(String),
-    Unknown(String),
-    RefPlaceholder(usize),
-    Placeholder(usize),
-}
-impl egg::Language for SKI {
-    #[inline(always)]
-    fn matches(&self, other: &Self) -> bool {
-        ::std::mem::discriminant(self) == ::std::mem::discriminant(other)
-            && match (self, other) {
-                (SKI::Prim(data1), SKI::Prim(data2)) => data1 == data2,
-                (SKI::App(l), SKI::App(r)) => {
-                    egg::LanguageChildren::len(l) == egg::LanguageChildren::len(r)
-                }
-                (SKI::Int(data1), SKI::Int(data2)) => data1 == data2,
-                (SKI::Float(data1), SKI::Float(data2)) => data1 == data2,
-                (SKI::Array(d1, l), SKI::Array(d2, r)) => {
-                    d1 == d2 && egg::LanguageChildren::len(l) == egg::LanguageChildren::len(r)
-                }
-                (SKI::Ref(data1), SKI::Ref(data2)) => data1 == data2,
-                (SKI::String(data1), SKI::String(data2)) => data1 == data2,
-                (SKI::Tick(data1), SKI::Tick(data2)) => data1 == data2,
-                (SKI::Ffi(data1), SKI::Ffi(data2)) => data1 == data2,
-                (SKI::Unknown(data1), SKI::Unknown(data2)) => data1 == data2,
-                (SKI::RefPlaceholder(data1), SKI::RefPlaceholder(data2)) => data1 == data2,
-                (SKI::Placeholder(data1), SKI::Placeholder(data2)) => data1 == data2,
-                _ => false,
-            }
-    }
-    fn children(&self) -> &[Id] {
-        match self {
-            SKI::Prim(_data) => &[],
-            SKI::App(ids) => egg::LanguageChildren::as_slice(ids),
-            SKI::Int(_data) => &[],
-            SKI::Float(_data) => &[],
-            SKI::Array(_, ids) => egg::LanguageChildren::as_slice(ids),
-            SKI::Ref(_data) => &[],
-            SKI::String(_data) => &[],
-            SKI::Tick(_data) => &[],
-            SKI::Ffi(_data) => &[],
-            SKI::Unknown(_data) => &[],
-            SKI::RefPlaceholder(_data) => &[],
-            SKI::Placeholder(_data) => &[],
-        }
-    }
-    fn children_mut(&mut self) -> &mut [Id] {
-        match self {
-            SKI::Prim(_data) => &mut [],
-            SKI::App(ids) => egg::LanguageChildren::as_mut_slice(ids),
-            SKI::Int(_data) => &mut [],
-            SKI::Float(_data) => &mut [],
-            SKI::Array(_, ids) => egg::LanguageChildren::as_mut_slice(ids),
-            SKI::Ref(_data) => &mut [],
-            SKI::String(_data) => &mut [],
-            SKI::Tick(_data) => &mut [],
-            SKI::Ffi(_data) => &mut [],
-            SKI::Unknown(_data) => &mut [],
-            SKI::RefPlaceholder(_data) => &mut [],
-            SKI::Placeholder(_data) => &mut [],
-        }
+
+#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct PlaceHolderNum(usize);
+
+impl core::str::FromStr for PlaceHolderNum {
+    type Err = &'static str;
+
+    fn from_str(_s: &str) -> Result<Self, Self::Err> {
+        Err("Cannot parse PlaceholderNum")
     }
 }
-impl ::std::fmt::Display for SKI {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match (self, f) {
-            (SKI::Prim(data), f) => ::std::fmt::Display::fmt(data, f),
-            (SKI::App(..), f) => f.write_str("@"),
-            (SKI::Int(data), f) => ::std::fmt::Display::fmt(data, f),
-            (SKI::Float(data), f) => ::std::fmt::Display::fmt(data, f),
-            (SKI::Array(data, _), f) => f.write_fmt(format_args!("Arr<{:#?}>", data)),
-            (SKI::Ref(data), f) => f.write_fmt(format_args!("Ref<{:#?}>", data)),
-            (SKI::String(data), f) => f.write_fmt(format_args!("Str<{:#?}>", data)),
-            (SKI::Tick(data), f) => f.write_fmt(format_args!("Tick<{:#?}>", data)),
-            (SKI::Ffi(data), f) => f.write_fmt(format_args!("FFI<{:#?}>", data)),
-            (SKI::Unknown(data), f) => f.write_fmt(format_args!("Unknown<{:#?}>", data)),
-            (SKI::RefPlaceholder(data), f) => ::std::fmt::Display::fmt(data, f),
-            (SKI::Placeholder(data), f) => ::std::fmt::Display::fmt(data, f),
-        }
+
+impl core::fmt::Display for PlaceHolderNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PlaceHolder").field(&self.0).finish()
     }
 }
-impl egg::FromOp for SKI {
-    type Error = egg::FromOpError;
-    fn from_op(
-        op: &str,
-        children: ::std::vec::Vec<egg::Id>,
-    ) -> ::std::result::Result<Self, Self::Error> {
-        match (op, children) {
-            (op, children) if op.parse::<Combinator>().is_ok() && children.is_empty() => {
-                Ok(SKI::Prim(op.parse().unwrap()))
-            }
-            (op, children)
-                if op == "@"
-                    && <[Id; 2] as egg::LanguageChildren>::can_be_length(children.len()) =>
-            {
-                let children = <[Id; 2] as egg::LanguageChildren>::from_vec(children);
-                Ok(SKI::App(children))
-            }
-            (op, children) if op.parse::<i64>().is_ok() && children.is_empty() => {
-                Ok(SKI::Int(op.parse().unwrap()))
-            }
-            (op, children) if op.parse::<OrderedFloat<f64>>().is_ok() && children.is_empty() => {
-                Ok(SKI::Float(op.parse().unwrap()))
-            }
-            (op, children)
-                if op.parse::<usize>().is_ok()
-                    && <Vec<Id> as egg::LanguageChildren>::can_be_length(children.len()) =>
-            {
-                let data = op.parse::<usize>().unwrap();
-                let children = <Vec<Id> as egg::LanguageChildren>::from_vec(children);
-                Ok(SKI::Array(data, children))
-            }
-            (op, children) if op.parse::<usize>().is_ok() && children.is_empty() => {
-                Ok(SKI::Ref(op.parse().unwrap()))
-            }
-            (op, children) if op.parse::<String>().is_ok() && children.is_empty() => {
-                Ok(SKI::String(op.parse().unwrap()))
-            }
-            (op, children) if op.parse::<String>().is_ok() && children.is_empty() => {
-                Ok(SKI::Tick(op.parse().unwrap()))
-            }
-            (op, children) if op.parse::<String>().is_ok() && children.is_empty() => {
-                Ok(SKI::Ffi(op.parse().unwrap()))
-            }
-            (op, children) if op.parse::<String>().is_ok() && children.is_empty() => {
-                Ok(SKI::Unknown(op.parse().unwrap()))
-            }
-            (op, children) if op.parse::<usize>().is_ok() && children.is_empty() => {
-                Ok(SKI::RefPlaceholder(op.parse().unwrap()))
-            }
-            (op, children) if op.parse::<usize>().is_ok() && children.is_empty() => {
-                Ok(SKI::Placeholder(op.parse().unwrap()))
-            }
-            (op, children) => Err(egg::FromOpError::new(op, children)),
-        }
+impl From<usize> for PlaceHolderNum {
+    fn from(value: usize) -> Self {
+        Self(value)
     }
 }
-*/
 
 define_language! {
     pub enum SKI {
@@ -160,13 +34,13 @@ define_language! {
         Int(i64),
         Float(OrderedFloat<f64>),
         Array(usize, Vec<Id>),
-        Ref(usize),
+        "*" = Ref([Id; 1]), // usize),
         String(String),
         Tick(String),
         Ffi(String),
         Unknown(String),
         RefPlaceholder(usize),
-        Placeholder(usize),
+        Placeholder(PlaceHolderNum),
     }
 }
 
@@ -183,11 +57,18 @@ impl CostFunction<SKI> for AstSizeHi{
         C: FnMut(Id) -> Self::Cost
     {
         let node_cost = match enode {
-            SKI::Placeholder(_) => 9999999,
-            SKI::Ref(_) => 9999999,
+            SKI::Placeholder(_) => usize::MAX ,
+            SKI::Ref(_) => usize::MAX,
             _ => 1
         };
-        enode.fold(node_cost, |sum, id| sum.saturating_add(costs(id)))
+        let cost = enode.fold(node_cost, |sum, id| 
+                              {
+            // println!("{enode:?} folding across child (id = {id}, cost = {cost})", cost=costs(id));
+                                  sum.saturating_add(costs(id)) 
+
+                              }
+                                  );
+        cost
     }
 }
 
@@ -220,7 +101,7 @@ pub fn program_to_egraph(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<S
     let mut idx_eid_map = HashMap::<Index, Id>::new();
     let mut refs = HashSet::<Id>::new();
     let root = construct_egraph(program, &mut idx_eid_map, &mut refs, &mut egraph, program.root);
-    resolve_refs(&idx_eid_map, &refs, &mut egraph);
+    // resolve_refs(&idx_eid_map, &refs, &mut egraph);
     (root, idx_eid_map, egraph)
 }
 
@@ -277,6 +158,7 @@ pub fn program_to_egraph_ph(program: &Program) -> (Id, HashMap<Index, Id>, EGrap
         None => panic!("missing root"),
     };
     
+    eclasses_check(&egraph);
     (root, idx_eid_map, egraph)
 }
 
@@ -287,6 +169,7 @@ pub fn optimize(egraph: EGraph<SKI, ()>, root: Id, fname: &str) -> String {
         // .run(&vec![]);
 
     runner.egraph.dot().to_svg(fname).unwrap();
+    eclasses_check(&runner.egraph);
 
     let extractor = Extractor::new(&runner.egraph, AstSizeHi);
     let (_, best) = extractor.find_best(root);
@@ -304,6 +187,7 @@ pub fn noop(egraph: EGraph<SKI, ()>, root: Id) -> String {
     let extractor = Extractor::new(&runner.egraph, AstSizeHi);
     let (_, best) = extractor.find_best(root);
     
+    runner.egraph.dot().to_svg("dots/foo.svg").unwrap();
     println!("best: {:#?}", best);
     
     best.to_string()
@@ -314,7 +198,7 @@ fn const_expr_to_enode(expr: &Expr) -> SKI {
         Expr::Prim(comb) => SKI::Prim(*comb),
         Expr::Int(i) => SKI::Int(*i),
         Expr::Float(flt) => SKI::Float(OrderedFloat(*flt)),
-        Expr::Ref(lbl) => SKI::Ref(*lbl),
+        // Expr::Ref(lbl) => SKI::Ref(*lbl),
         Expr::String(s) => SKI::String(s.to_string()),
         Expr::Tick(s) => SKI::Tick(s.to_string()),
         Expr::Ffi(s) => SKI::Ffi(s.to_string()),
@@ -328,7 +212,7 @@ fn add_placeholders(
     egraph: &mut EGraph<SKI, ()>
 ) {
     program.body.iter().enumerate().for_each(|(idx, _)| {
-        let eid = egraph.add(SKI::Placeholder(idx));
+        let eid = egraph.add(SKI::Placeholder(idx.into()));
         idx_eid_map.insert(idx, eid);
     })
 }
@@ -346,7 +230,16 @@ fn fill_placeholders(
             Expr::String(s) => egraph.add(SKI::String(s.to_string())),
             Expr::Tick(s) => egraph.add(SKI::Tick(s.to_string())),
             Expr::Ffi(s) => egraph.add(SKI::Ffi(s.to_string())),
-            Expr::Ref(lbl) => egraph.add(SKI::Ref(*lbl)),
+            Expr::Ref(lbl) => {
+                let ref_idx = program.defs[*lbl];
+                let ref_eid = match idx_eid_map.get(&ref_idx) {
+                    Some(x) => *x,
+                    None => panic!("missing ref"),
+                };
+                let new_eid = egraph.add(SKI::Ref([ref_eid]));
+                egraph.union(new_eid, ref_eid);
+                new_eid
+            },
             Expr::App(f, a) => {
                 let func_eid = match idx_eid_map.get(f) {
                     Some(eid) => *eid,
@@ -378,14 +271,16 @@ fn fill_placeholders(
 
         egraph.union(placeholder, eid);
 
+        /*
         if let Expr::Ref(lbl) = expr {
-            let ref_idx = &program.defs[*lbl];
-            let ref_eid = match idx_eid_map.get(ref_idx) {
+            let ref_idx = program.defs[*lbl];
+            let ref_eid = match idx_eid_map.get(&ref_idx) {
                 Some(x) => *x,
                 None => panic!("missing ref"),
             };
             egraph.union(eid, ref_eid);
         }
+        */
     })
 }
 
@@ -552,8 +447,8 @@ fn construct_egraph(
         }
         Expr::Ref(lbl) => {
             let def_idx = &program.defs[*lbl]; // index of referenced expr in program body
+            println!("sanity {:#?}", def_idx);
             /*
-            println!("hi {:#?}", def_idx);
             let ref_obj_eid = match idx_eid_map.get(def_idx) {
                 Some(eid) => *eid,
                 None => construct_egraph(program, idx_eid_map, refs, egraph, *def_idx),
@@ -584,6 +479,16 @@ fn construct_egraph(
     }
 }
 
+fn eclasses_check(egraph: &EGraph<SKI, ()>) {
+    egraph.classes().for_each(|ec| {
+        let not_ref_or_placeholder: Vec<&SKI> = ec.nodes.iter().filter(|en| 
+            !matches!(en, SKI::Placeholder(_) | SKI::Ref(_))
+        ).collect();
+        assert!(!not_ref_or_placeholder.is_empty())
+    })
+}
+
+/*
 fn resolve_refs(
     idx_eid_map: &HashMap<Index, Id>,
     refs: &HashSet<Id>,
@@ -627,6 +532,7 @@ fn resolve_refs(
 
     println!("hi");
 }
+*/
 
 fn construct_program(
     expr: &RecExpr<SKI>,
