@@ -2,7 +2,7 @@ use egg::*;
 use lice::combinator::Combinator;
 use lice::file::{Expr, Index, Program};
 use ordered_float::OrderedFloat;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct PlaceHolderNum(usize);
@@ -38,7 +38,6 @@ define_language! {
         Tick(String),
         Ffi(String),
         Unknown(String),
-        RefPlaceholder(usize),
         Placeholder(PlaceHolderNum),
     }
 }
@@ -55,11 +54,11 @@ impl CostFunction<SKI> for AstSizeHi {
             SKI::Ref(_) => usize::MAX,
             _ => 1,
         };
-        let cost = enode.fold(node_cost, |sum, id| {
+
+        enode.fold(node_cost, |sum, id| {
             // println!("{enode:?} folding across child (id = {id}, cost = {cost})", cost=costs(id));
             sum.saturating_add(costs(id))
-        });
-        cost
+        })
     }
 }
 

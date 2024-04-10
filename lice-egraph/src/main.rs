@@ -32,7 +32,7 @@ fn main() {
     // c.program.
     // println!("{:#?}\n", &c.program);
 
-    let (root, mp, egraph) = program_to_egraph(&c.program);
+    let (root, _mp, egraph) = program_to_egraph(&c.program);
     let optimized = optimize(egraph, root, "dots/main.svg");
     println!("{:#?}\n len: {:#?}", optimized, optimized.len());
 
