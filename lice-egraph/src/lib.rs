@@ -1,9 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use egg::*;
-use ordered_float::OrderedFloat;
 use lice::combinator::Combinator;
 use lice::file::{Expr, Index, Program};
-
+use ordered_float::OrderedFloat;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct PlaceHolderNum(usize);
@@ -45,28 +44,24 @@ define_language! {
 }
 
 struct AstSizeHi;
-impl CostFunction<SKI> for AstSizeHi{
+impl CostFunction<SKI> for AstSizeHi {
     type Cost = usize;
     fn cost<C>(&mut self, enode: &SKI, mut costs: C) -> Self::Cost
     where
-        C: FnMut(Id) -> Self::Cost
+        C: FnMut(Id) -> Self::Cost,
     {
         let node_cost = match enode {
-            SKI::Placeholder(_) => usize::MAX ,
+            SKI::Placeholder(_) => usize::MAX,
             SKI::Ref(_) => usize::MAX,
-            _ => 1
+            _ => 1,
         };
-        let cost = enode.fold(node_cost, |sum, id| 
-                              {
+        let cost = enode.fold(node_cost, |sum, id| {
             // println!("{enode:?} folding across child (id = {id}, cost = {cost})", cost=costs(id));
-                                  sum.saturating_add(costs(id)) 
-
-                              }
-                                  );
+            sum.saturating_add(costs(id))
+        });
         cost
     }
 }
-
 
 fn ski_reductions() -> Vec<Rewrite<SKI, ()>> {
     vec![
@@ -96,12 +91,12 @@ pub fn program_to_egraph(program: &Program) -> (Id, HashMap<Index, Id>, EGraph<S
     let mut idx_eid_map = HashMap::<Index, Id>::new();
     add_placeholders(program, &mut idx_eid_map, &mut egraph);
     fill_placeholders(program, &mut idx_eid_map, &mut egraph);
-    
+
     let root = match idx_eid_map.get(&program.root) {
         Some(eid) => *eid,
         None => panic!("missing root"),
     };
-    
+
     eclasses_check(&egraph);
     (root, idx_eid_map, egraph)
 }
@@ -110,16 +105,16 @@ pub fn optimize(egraph: EGraph<SKI, ()>, root: Id, fname: &str) -> String {
     let runner = Runner::<SKI, ()>::default()
         .with_egraph(egraph)
         .run(&ski_reductions());
-        // .run(&vec![]);
+    // .run(&vec![]);
 
     runner.egraph.dot().to_svg(fname).unwrap();
     eclasses_check(&runner.egraph);
 
     let extractor = Extractor::new(&runner.egraph, AstSizeHi);
     let (_, best) = extractor.find_best(root);
-    
+
     println!("best: {:#?}", best);
-    
+
     best.to_string()
 }
 
@@ -130,17 +125,17 @@ pub fn noop(egraph: EGraph<SKI, ()>, root: Id) -> String {
 
     let extractor = Extractor::new(&runner.egraph, AstSizeHi);
     let (_, best) = extractor.find_best(root);
-    
+
     runner.egraph.dot().to_svg("dots/foo.svg").unwrap();
     println!("best: {:#?}", best);
-    
+
     best.to_string()
 }
 
 fn add_placeholders(
     program: &Program,
     idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>
+    egraph: &mut EGraph<SKI, ()>,
 ) {
     program.body.iter().enumerate().for_each(|(idx, _)| {
         let eid = egraph.add(SKI::Placeholder(idx.into()));
@@ -151,7 +146,7 @@ fn add_placeholders(
 fn fill_placeholders(
     program: &Program,
     idx_eid_map: &mut HashMap<Index, Id>,
-    egraph: &mut EGraph<SKI, ()>
+    egraph: &mut EGraph<SKI, ()>,
 ) {
     program.body.iter().enumerate().for_each(|(idx, expr)| {
         let eid = match expr {
@@ -170,7 +165,7 @@ fn fill_placeholders(
                 let new_eid = egraph.add(SKI::Ref([ref_eid]));
                 egraph.union(new_eid, ref_eid);
                 new_eid
-            },
+            }
             Expr::App(f, a) => {
                 let func_eid = match idx_eid_map.get(f) {
                     Some(eid) => *eid,
@@ -181,17 +176,20 @@ fn fill_placeholders(
                     None => panic!("missing placeholder: {:#?}", f),
                 };
                 egraph.add(SKI::App([func_eid, arg_eid]))
-            },
+            }
             Expr::Array(u, arr) => {
-                let e_arr: Vec<Id> = arr.iter().map(|i| { 
-                    let elmt_eid = match idx_eid_map.get(i) {
-                        Some(eid) => *eid,
-                        None => panic!("missing placeholder: {:#?}", i),
-                    };
-                    elmt_eid
-                }).collect();
+                let e_arr: Vec<Id> = arr
+                    .iter()
+                    .map(|i| {
+                        let elmt_eid = match idx_eid_map.get(i) {
+                            Some(eid) => *eid,
+                            None => panic!("missing placeholder: {:#?}", i),
+                        };
+                        elmt_eid
+                    })
+                    .collect();
                 egraph.add(SKI::Array(*u, e_arr))
-            },
+            }
             _ => panic!("unknown expr: {:#?}", expr),
         };
 
@@ -206,9 +204,11 @@ fn fill_placeholders(
 
 fn eclasses_check(egraph: &EGraph<SKI, ()>) {
     egraph.classes().for_each(|ec| {
-        let not_ref_or_placeholder: Vec<&SKI> = ec.nodes.iter().filter(|en| 
-            !matches!(en, SKI::Placeholder(_) | SKI::Ref(_))
-        ).collect();
+        let not_ref_or_placeholder: Vec<&SKI> = ec
+            .nodes
+            .iter()
+            .filter(|en| !matches!(en, SKI::Placeholder(_) | SKI::Ref(_)))
+            .collect();
         assert!(!not_ref_or_placeholder.is_empty())
     })
 }
@@ -246,7 +246,7 @@ mod tests {
         };
         assert_eq!(p.to_string(), "S K :0 @ _0 @ #1 @ }");
         let (root, _, egraph) = program_to_egraph(&p);
-        let optimized = optimize(egraph, root, "dots/test1.svg"); 
+        let optimized = optimize(egraph, root, "dots/test1.svg");
         // println!("{:#?}\n", optimized);
         assert!(optimized == "1");
     }
@@ -270,7 +270,7 @@ mod tests {
         let (root, _m, egraph) = program_to_egraph(&p);
         // println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
-        let optimized = optimize(egraph, root, "dots/test2.svg"); 
+        let optimized = optimize(egraph, root, "dots/test2.svg");
         // println!("{:#?}\n", optimized);
         assert!(optimized == "1");
         // println!("refs --------")
@@ -297,7 +297,7 @@ mod tests {
         let (root, _m, egraph) = program_to_egraph(&p);
         println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
-        let optimized = optimize(egraph, root, "dots/test3.svg"); 
+        let optimized = optimize(egraph, root, "dots/test3.svg");
         println!("optimized: {:#?}\n", optimized);
     }
 
@@ -320,7 +320,7 @@ mod tests {
         let (root, _m, egraph) = program_to_egraph(&p);
         println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
-        let optimized = optimize(egraph, root, "dots/test4.svg"); 
+        let optimized = optimize(egraph, root, "dots/test4.svg");
         println!("optimized: {:#?}\n", optimized);
     }
 
@@ -337,12 +337,10 @@ mod tests {
                 /* 5 */ Expr::App(12, 2),
                 /* 6 */ Expr::App(5, 3),
                 /* 7 */ Expr::App(4, 6),
-                
                 /* 8 */ Expr::Prim(Combinator::Return),
                 /* 9 */ Expr::App(0, 7),
                 /* 10 */ Expr::App(8, 13),
                 /* 11 */ Expr::App(9, 10),
-
                 /* 12 */ Expr::Ref(0),
                 /* 13 */ Expr::Ref(1),
             ],
@@ -352,7 +350,7 @@ mod tests {
         let (root, _m, egraph) = program_to_egraph(&p);
         println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
-        let optimized = optimize(egraph, root, "dots/test5.svg"); 
+        let optimized = optimize(egraph, root, "dots/test5.svg");
         println!("optimized: {:#?}\n", optimized);
     }
 }
