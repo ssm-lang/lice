@@ -11,3 +11,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["John Hui <j-hui@cs.columbia.edu>"]
 license = "MIT"
+
+[profile.release]
+# Useful for debugging + profiling w/ flamegraph
+debug = true
