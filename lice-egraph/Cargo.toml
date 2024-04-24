@@ -1,0 +1,16 @@
+[package]
+name = "lice-egraph"
+description = "Equality Saturation for MicroHs programs"
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lice = { path = "../lice", features = [ "graph" ] }
+egg = "0.9.5" 
+lice-macros = { path = "../lice-macros" }
+parse-display = { version = "0.9" }
+ordered-float = "4.2.0"
+log = "0.4.21"
+clap = { verison = "4.5.4", features = [ "derive" ] }
