@@ -2,7 +2,69 @@ use egg::*;
 use lice::combinator::Combinator;
 use lice::file::{Expr, Index, Program};
 use ordered_float::OrderedFloat;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
+
+
+use std::cmp::Ordering;
+
+
+pub struct MyAstSize;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MyCost {
+    Finite(usize),
+    Infinite(isize),
+}
+
+fn add(a: MyCost, b: MyCost) -> MyCost {
+    use MyCost::*;
+    match (a, b) {
+        (Infinite(wtv), _) => Infinite(wtv),
+        (_, Infinite(wtv)) => Infinite(wtv),
+        (Finite(x), Finite(y)) => Finite(x + y),
+    }
+}
+
+fn add1(a: MyCost, b: MyCost) -> MyCost {
+    add(add(a, b), MyCost::Finite(1))
+}
+
+impl PartialOrd for MyCost {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use MyCost::*;
+        match (self, other) {
+            (Finite(x), Finite(y)) => x.partial_cmp(y),
+            (Infinite(_), Infinite(_)) => Some(Ordering::Equal),
+            (Infinite(_), Finite(_)) => Some(Ordering::Greater),
+            (Finite(_), Infinite(_)) => Some(Ordering::Less),
+        }
+    }
+}
+
+impl CostFunction<SKI> for MyAstSize {
+    type Cost = MyCost;
+
+    fn cost<C>(&mut self, t: &SKI, mut costs: C) -> MyCost where C: FnMut(Id) -> MyCost {
+        match t {
+            SKI::App([f, a]) => {
+                let cf = costs(*f);
+                let ca = costs(*a);
+                let cost = add1(cf, ca);
+                // println!("App ({cost:?}): {f:?} ({cf:?}) @ {a:?} ({ca:?})");
+                cost
+            }
+            SKI::Placeholder(id) => MyCost::Infinite(*id as isize),
+            SKI::Ref([id]) => {
+                add(MyCost::Finite(1), costs(*id))
+            }
+            _ => {
+                // println!("{t:?}: 1");
+                MyCost::Finite(1)
+            }
+        }
+    }
+}
+
 
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct PlaceHolderNum(usize);
@@ -20,8 +82,40 @@ impl core::fmt::Display for PlaceHolderNum {
         f.debug_tuple("PlaceHolder").field(&self.0).finish()
     }
 }
+
 impl From<usize> for PlaceHolderNum {
     fn from(value: usize) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct MyStr(String);
+
+impl core::str::FromStr for MyStr {
+    type Err = &'static str;
+
+    fn from_str(_s: &str) -> Result<Self, Self::Err> {
+        Err("Cannot parse MyStr")
+    }
+}
+
+impl core::fmt::Display for MyStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = &self.0;
+        write!(f, "{}", s.as_str())
+    }
+}
+
+impl core::fmt::Debug for MyStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = &self.0;
+        write!(f, "{}", s.as_str())
+    }
+}
+
+impl From<String> for MyStr {
+    fn from(value: String) -> Self {
         Self(value)
     }
 }
@@ -34,12 +128,12 @@ define_language! {
         Float(OrderedFloat<f64>),
         Array(usize, Vec<Id>),
         "*" = Ref([Id; 1]), // usize),
-        String(String),
-        Tick(String),
-        Ffi(String),
+        String(MyStr),
+        Tick(MyStr),
+        Ffi(MyStr),
         Unknown(String),
         RefPlaceholder(usize),
-        Placeholder(PlaceHolderNum),
+        Placeholder(usize),
     }
 }
 
@@ -55,11 +149,7 @@ impl CostFunction<SKI> for AstSizeHi {
             SKI::Ref(_) => usize::MAX,
             _ => 1,
         };
-        let cost = enode.fold(node_cost, |sum, id| {
-            // println!("{enode:?} folding across child (id = {id}, cost = {cost})", cost=costs(id));
-            sum.saturating_add(costs(id))
-        });
-        cost
+        enode.fold(node_cost, |sum, id| { sum.saturating_add(costs(id)) })
     }
 }
 
@@ -105,15 +195,42 @@ pub fn optimize(egraph: EGraph<SKI, ()>, root: Id, fname: &str) -> String {
     let runner = Runner::<SKI, ()>::default()
         .with_egraph(egraph)
         .run(&ski_reductions());
-    // .run(&vec![]);
 
     runner.egraph.dot().to_svg(fname).unwrap();
     eclasses_check(&runner.egraph);
 
-    let extractor = Extractor::new(&runner.egraph, AstSizeHi);
-    let (_, best) = extractor.find_best(root);
+    let extractor = Extractor::new(&runner.egraph, MyAstSize);
+    let (cost, best) = extractor.find_best(root);
+    
+    
+    println!("best: {best:?}");
+    println!("expr: {:#?} \n cost: {:#?}", best.to_string(), cost);
+    
+    let mut i = true;
+    // println!("{{ ");
+    for ec in runner.egraph.classes() {
+        if !i {
+            // print!(", ");
+        }
+        i = false;
+        
+        // print!("\"eclass {:04}\": {{ ", ec.id);
 
-    println!("best: {:#?}", best);
+        // print!("\"nodes\": [");
+        let mut j = true;
+        for node in &ec.nodes {
+            if !j {
+                // print!(", ");
+            }
+            j = false;
+            // print!("\"{node:?}\"");
+        }
+        // print!(" ], ");
+        // print!("\"best cost\": \"{:?}\", ", extractor.find_best_cost(ec.id));
+        // print!("\"Best node\": \"{:?}\" ", extractor.find_best_node(ec.id));
+        // println!("}}");
+    }
+    // println!("\n\n");
 
     best.to_string()
 }
@@ -153,9 +270,9 @@ fn fill_placeholders(
             Expr::Prim(comb) => egraph.add(SKI::Prim(*comb)),
             Expr::Int(i) => egraph.add(SKI::Int(*i)),
             Expr::Float(flt) => egraph.add(SKI::Float(OrderedFloat(*flt))),
-            Expr::String(s) => egraph.add(SKI::String(s.to_string())),
-            Expr::Tick(s) => egraph.add(SKI::Tick(s.to_string())),
-            Expr::Ffi(s) => egraph.add(SKI::Ffi(s.to_string())),
+            Expr::String(s) => egraph.add(SKI::String(MyStr(s.to_string()))),
+            Expr::Tick(s) => egraph.add(SKI::Tick(MyStr(s.to_string()))),
+            Expr::Ffi(s) => egraph.add(SKI::Ffi(MyStr(s.to_string()))),
             Expr::Ref(lbl) => {
                 let ref_idx = program.defs[*lbl];
                 let ref_eid = match idx_eid_map.get(&ref_idx) {
@@ -245,9 +362,10 @@ mod tests {
             defs: vec![0],
         };
         assert_eq!(p.to_string(), "S K :0 @ _0 @ #1 @ }");
+        println!("expr: {:#?}\n", p.to_string());
         let (root, _, egraph) = program_to_egraph(&p);
         let optimized = optimize(egraph, root, "dots/test1.svg");
-        // println!("{:#?}\n", optimized);
+        println!("optimized: {:#?}\n", optimized);
         assert!(optimized == "1");
     }
 
@@ -295,7 +413,7 @@ mod tests {
         };
         println!("expr: {:#?}", p.to_string());
         let (root, _m, egraph) = program_to_egraph(&p);
-        println!("root: {:#?}", root);
+        // println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
         let optimized = optimize(egraph, root, "dots/test3.svg");
         println!("optimized: {:#?}\n", optimized);
@@ -318,7 +436,7 @@ mod tests {
         };
         println!("expr: {:#?}", p.to_string());
         let (root, _m, egraph) = program_to_egraph(&p);
-        println!("root: {:#?}", root);
+        // println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
         let optimized = optimize(egraph, root, "dots/test4.svg");
         println!("optimized: {:#?}\n", optimized);
@@ -351,6 +469,28 @@ mod tests {
         println!("root: {:#?}", root);
         // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
         let optimized = optimize(egraph, root, "dots/test5.svg");
+        println!("optimized: {:#?}\n", optimized);
+    }
+
+    #[test]
+    fn cyclic() {
+        let p = Program {
+            root: 3,
+            body: vec![
+                /* 0 */ Expr::Prim(Combinator::K),
+                /* 1 */ Expr::String("hi".to_string()),
+                /* 2 */ Expr::Ref(0),
+                /* 3 */ Expr::App(4, 1),
+                /* 4 */ Expr::App(0, 2),
+            ],
+            defs: vec![3],
+        };
+
+        println!("expr: {:#?}", p.to_string());
+        let (root, _m, egraph) = program_to_egraph(&p);
+        println!("root: {:#?}", root);
+        // egraph.classes().for_each(|ec| { println!("{:#?}", ec)});
+        let optimized = optimize(egraph, root, "dots/test6.svg");
         println!("optimized: {:#?}\n", optimized);
     }
 }

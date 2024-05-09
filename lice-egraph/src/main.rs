@@ -1,5 +1,7 @@
 use clap::Parser;
 use lice::file::CombFile;
+use lice::combinator::Combinator;
+use lice::file::{Expr, Index, Program};
 use lice_egraph::{noop, optimize, program_to_egraph};
 use log::error;
 use std::{fs::File, io::Read, path::PathBuf, process, str::FromStr};
@@ -29,16 +31,6 @@ fn main() {
         process::exit(1);
     });
 
-    // c.program.
-    // println!("{:#?}\n", &c.program);
-
     let (root, mp, egraph) = program_to_egraph(&c.program);
     let optimized = optimize(egraph, root, "dots/main.svg");
-    println!("{:#?}\n len: {:#?}", optimized, optimized.len());
-
-    let (root2, _, egraph2) = program_to_egraph(&c.program);
-    let noop = noop(egraph2, root2);
-    println!("{:#?}\n len: {:#?}", noop, noop.len());
-
-    // println!("{:#?}", mp[&c.program.defs[42]]);
 }
