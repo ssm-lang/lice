@@ -3,8 +3,6 @@ use lice::combinator::Combinator;
 use lice::file::{Expr, Index, Program};
 use ordered_float::OrderedFloat;
 use std::collections::{HashMap};
-
-
 use std::cmp::Ordering;
 
 
@@ -64,7 +62,6 @@ impl CostFunction<SKI> for MyAstSize {
         }
     }
 }
-
 
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct PlaceHolderNum(usize);
@@ -132,7 +129,6 @@ define_language! {
         Tick(MyStr),
         Ffi(MyStr),
         Unknown(String),
-        RefPlaceholder(usize),
         Placeholder(usize),
     }
 }
@@ -149,7 +145,10 @@ impl CostFunction<SKI> for AstSizeHi {
             SKI::Ref(_) => usize::MAX,
             _ => 1,
         };
-        enode.fold(node_cost, |sum, id| { sum.saturating_add(costs(id)) })
+
+        enode.fold(node_cost, |sum, id| {
+            sum.saturating_add(costs(id))
+        })
     }
 }
 
